@@ -13,12 +13,12 @@ def calcular_baseline_aterro(
     doc=DOC_PADRAO,
     docf=DOCF_DEFAULT,
     mcf=1.0,
-    anos=ANOS_PROJECAO
+    anos=ANOS_PROJECAO,
+    gwp_ch4=GWP_CH4
 ):
     """
     Retorna o total de CO2e (t) emitido ao longo de ANOS_PROJECAO.
-    Agora usando DOCf fixo (Tabela 7 da A6.4-AMT-003).
-    A temperatura não entra mais no cálculo do DOCf.
+    Agora usando DOCf fixo (Tabela 7 da A6.4-AMT-003) e gwp_ch4 opcional.
     """
     if massa_kg <= 0:
         return 0.0
@@ -36,7 +36,7 @@ def calcular_baseline_aterro(
     kernel = np.exp(-k * (t-1)/365) - np.exp(-k * t/365)
     kernel = np.maximum(kernel, 0)
     ch4_diario_kg = np.convolve(entrada, kernel, mode='full')[:dias] * ch4_pot_por_kg
-    co2eq_t = (ch4_diario_kg * GWP_CH4) / 1000.0
+    co2eq_t = (ch4_diario_kg * gwp_ch4) / 1000.0
     return co2eq_t.sum()
 
 def calcular_baseline_aterro_series(
@@ -46,11 +46,12 @@ def calcular_baseline_aterro_series(
     doc=DOC_PADRAO,
     docf=DOCF_DEFAULT,
     mcf=1.0,
-    anos=ANOS_PROJECAO
+    anos=ANOS_PROJECAO,
+    gwp_ch4=GWP_CH4
 ):
     """
     Retorna array diário de CO2e (t) para o baseline (aterro).
-    Agora usando DOCf fixo (Tabela 7 da A6.4-AMT-003).
+    Agora usando DOCf fixo (Tabela 7 da A6.4-AMT-003) e gwp_ch4 opcional.
     """
     if massa_kg <= 0:
         return np.zeros(anos * 365)
@@ -68,7 +69,7 @@ def calcular_baseline_aterro_series(
     kernel = np.exp(-k * (t-1)/365) - np.exp(-k * t/365)
     kernel = np.maximum(kernel, 0)
     ch4_diario_kg = np.convolve(entrada, kernel, mode='full')[:dias] * ch4_pot_por_kg
-    co2eq_diario_t = (ch4_diario_kg * GWP_CH4) / 1000.0
+    co2eq_diario_t = (ch4_diario_kg * gwp_ch4) / 1000.0
     return co2eq_diario_t
 
 # =============================================================================
@@ -85,54 +86,75 @@ def estimar_metano_produzido(massa_ano_kg, eficiencia_motor=0.40, pci_biogas_mj_
     return ch4_t
 
 # =============================================================================
-# EMISSÕES DO BIODIGESTOR (TOOL14)
+# EMISSÕES DO BIODIGESTOR (TOOL14) – COM STORAGE_FACTOR DINÂMICO
 # =============================================================================
 
-def calcular_emissoes_biodigestor(q_ch4_t, tipo='CSTR', digestato_armazenado_anaerobicamente=True):
+def calcular_emissoes_biodigestor(q_ch4_t, tipo='CSTR', storage_factor=None):
     """
     Retorna: PE_EC, PE_CH4, PE_flare, LE_storage (t CO2e)
+    - storage_factor: fração do CH4 produzido que vaza do digestato.
+      Se None, usa o valor padrão baseado no tipo de digestor (TOOL14).
     """
+    # Definir fatores padrão baseados no tipo de digestor (TOOL14)
     if tipo == 'CSTR':
         f_ec = F_EC_DEFAULT
         ef_ch4 = EF_CH4_DEFAULT
-        f_storage = F_WW_CH4_DEFAULT
+        default_storage = STORAGE_FACTOR_POR_TIPO.get('CSTR', 0.20)
+    elif tipo == 'UASB':
+        f_ec = 0.0
+        ef_ch4 = 0.05
+        default_storage = STORAGE_FACTOR_POR_TIPO.get('UASB', 0.15)
+    elif tipo == 'Lagoa coberta':
+        f_ec = 0.0
+        ef_ch4 = 0.05
+        default_storage = STORAGE_FACTOR_POR_TIPO.get('Lagoa coberta', 0.10)
     else:
         f_ec = 0.0
         ef_ch4 = 0.05
-        f_storage = 0.10
+        default_storage = 0.20
+
+    if storage_factor is None:
+        storage_factor = default_storage
+    storage_factor = max(0.0, min(0.5, storage_factor))
 
     PE_EC = q_ch4_t * f_ec * EF_EL_DEFAULT
     PE_CH4 = q_ch4_t * ef_ch4 * GWP_CH4
     PE_flare = 0.0
-
-    if digestato_armazenado_anaerobicamente:
-        LE_storage = q_ch4_t * f_storage * GWP_CH4
-    else:
-        LE_storage = 0.0
+    LE_storage = q_ch4_t * storage_factor * GWP_CH4
 
     return PE_EC, PE_CH4, PE_flare, LE_storage
 
-def calcular_emissoes_biodigestor_series(q_ch4_t, tipo='CSTR', digestato_armazenado=True, anos=ANOS_PROJECAO):
+def calcular_emissoes_biodigestor_series(q_ch4_t, tipo='CSTR', storage_factor=None, anos=ANOS_PROJECAO):
     """
     Retorna dicionário com séries diárias de PE_EC, PE_CH4, LE_storage (t CO2e/dia).
     As emissões são distribuídas uniformemente ao longo dos dias.
     """
     dias = anos * 365
+
     if tipo == 'CSTR':
         f_ec = F_EC_DEFAULT
         ef_ch4 = EF_CH4_DEFAULT
-        f_storage = F_WW_CH4_DEFAULT
+        default_storage = STORAGE_FACTOR_POR_TIPO.get('CSTR', 0.20)
+    elif tipo == 'UASB':
+        f_ec = 0.0
+        ef_ch4 = 0.05
+        default_storage = STORAGE_FACTOR_POR_TIPO.get('UASB', 0.15)
+    elif tipo == 'Lagoa coberta':
+        f_ec = 0.0
+        ef_ch4 = 0.05
+        default_storage = STORAGE_FACTOR_POR_TIPO.get('Lagoa coberta', 0.10)
     else:
         f_ec = 0.0
         ef_ch4 = 0.05
-        f_storage = 0.10
+        default_storage = 0.20
+
+    if storage_factor is None:
+        storage_factor = default_storage
+    storage_factor = max(0.0, min(0.5, storage_factor))
 
     PE_EC_dia = (q_ch4_t * f_ec * EF_EL_DEFAULT) / dias
     PE_CH4_dia = (q_ch4_t * ef_ch4 * GWP_CH4) / dias
-    if digestato_armazenado:
-        LE_storage_dia = (q_ch4_t * f_storage * GWP_CH4) / dias
-    else:
-        LE_storage_dia = 0.0
+    LE_storage_dia = (q_ch4_t * storage_factor * GWP_CH4) / dias
 
     return {
         'PE_EC': np.full(dias, PE_EC_dia),
@@ -143,52 +165,8 @@ def calcular_emissoes_biodigestor_series(q_ch4_t, tipo='CSTR', digestato_armazen
     }
 
 # =============================================================================
-# REDUÇÃO LÍQUIDA (ACM0022) – VERSÕES COM GWP CUSTOMIZADO E PARÂMETROS EXPLÍCITOS
+# REDUÇÃO LÍQUIDA (ACM0022) – VERSÕES COM PARÂMETROS EXPLÍCITOS
 # =============================================================================
-
-def calcular_reducoes_com_gwp(massa_ano_kg, captura_metano_baseline=0.0,
-                              doc=DOC_PADRAO, k=K_PADRAO, mcf=1.0,
-                              tipo_digestor='CSTR', digestato_armazenado=True,
-                              gwp_ch4=GWP_CH4, gwp_n2o=GWP_N2O,
-                              docf=DOCF_DEFAULT):
-    """
-    Versão da função calcular_reducoes que aceita GWP personalizado e docf.
-    Retorna o dicionário com baseline, PE, LE, ER usando os GWP fornecidos.
-    """
-    # Baseline usa o GWP_CH4 fornecido (mas a função calcular_baseline_aterro usa GWP_CH4 global)
-    from utils.config import GWP_CH4 as GWP_CH4_DEFAULT, GWP_N2O as GWP_N2O_DEFAULT
-    # Guardar valores originais
-    orig_gwp_ch4 = GWP_CH4_DEFAULT
-    orig_gwp_n2o = GWP_N2O_DEFAULT
-    # Temporariamente substituir
-    import utils.config
-    utils.config.GWP_CH4 = gwp_ch4
-    utils.config.GWP_N2O = gwp_n2o
-
-    # Reimportar funções para usar os novos GWP
-    from utils.calculos_emissao import calcular_baseline_aterro, estimar_metano_produzido, calcular_emissoes_biodigestor
-
-    baseline = calcular_baseline_aterro(massa_ano_kg, captura_metano_baseline, k, doc, docf, mcf)
-    q_ch4 = estimar_metano_produzido(massa_ano_kg)
-    PE_EC, PE_CH4, PE_flare, LE_storage = calcular_emissoes_biodigestor(q_ch4, tipo_digestor, digestato_armazenado)
-    PE = PE_EC + PE_CH4
-    LE = LE_storage
-    ER = baseline - PE - LE
-
-    # Restaurar valores originais
-    utils.config.GWP_CH4 = orig_gwp_ch4
-    utils.config.GWP_N2O = orig_gwp_n2o
-
-    return {
-        'baseline': baseline,
-        'PE_EC': PE_EC,
-        'PE_CH4': PE_CH4,
-        'PE_total': PE,
-        'LE_storage': LE_storage,
-        'LE_total': LE,
-        'ER': ER,
-        'q_ch4': q_ch4
-    }
 
 def calcular_reducoes_com_parametros(
     massa_ano_kg: float,
@@ -196,34 +174,61 @@ def calcular_reducoes_com_parametros(
     doc: float,
     docf: float = DOCF_DEFAULT,
     captura_metano: float = 0.0,
+    storage_factor: float = None,
     eficiencia_motor: float = 0.40,
     umidade: float = 0.85,
     mcf: float = 1.0,
     tipo_digestor: str = 'CSTR',
-    digestato_armazenado: bool = True,
     gwp_ch4: float = GWP_CH4,
     gwp_n2o: float = GWP_N2O
 ) -> dict:
     """
-    Versão da função calcular_reducoes com todos os parâmetros explicitamente.
-    Usa docf fixo (A6.4-AMT-003) e permite GWP customizado.
+    Calcula reduções com todos os parâmetros explicitamente.
+    Agora sem modificar variáveis globais – passamos gwp_ch4 diretamente.
     """
-    from utils.config import GWP_CH4 as GWP_CH4_DEFAULT, GWP_N2O as GWP_N2O_DEFAULT
-    orig_gwp_ch4 = GWP_CH4_DEFAULT
-    orig_gwp_n2o = GWP_N2O_DEFAULT
-    import utils.config
-    utils.config.GWP_CH4 = gwp_ch4
-    utils.config.GWP_N2O = gwp_n2o
+    # Baseline usando o gwp_ch4 fornecido
+    baseline = calcular_baseline_aterro(
+        massa_ano_kg,
+        captura_metano,
+        k,
+        doc,
+        docf,
+        mcf,
+        gwp_ch4=gwp_ch4
+    )
 
-    baseline = calcular_baseline_aterro(massa_ano_kg, captura_metano, k, doc, docf, mcf)
     q_ch4 = estimar_metano_produzido(massa_ano_kg)
-    PE_EC, PE_CH4, PE_flare, LE_storage = calcular_emissoes_biodigestor(q_ch4, tipo_digestor, digestato_armazenado)
+
+    # Determinar fatores padrão (repetido aqui para garantir que não dependa de globais)
+    if tipo_digestor == 'CSTR':
+        f_ec = F_EC_DEFAULT
+        ef_ch4 = EF_CH4_DEFAULT
+        default_storage = STORAGE_FACTOR_POR_TIPO.get('CSTR', 0.20)
+    elif tipo_digestor == 'UASB':
+        f_ec = 0.0
+        ef_ch4 = 0.05
+        default_storage = STORAGE_FACTOR_POR_TIPO.get('UASB', 0.15)
+    elif tipo_digestor == 'Lagoa coberta':
+        f_ec = 0.0
+        ef_ch4 = 0.05
+        default_storage = STORAGE_FACTOR_POR_TIPO.get('Lagoa coberta', 0.10)
+    else:
+        f_ec = 0.0
+        ef_ch4 = 0.05
+        default_storage = 0.20
+
+    if storage_factor is None:
+        storage_factor = default_storage
+    storage_factor = max(0.0, min(0.5, storage_factor))
+
+    PE_EC = q_ch4 * f_ec * EF_EL_DEFAULT
+    PE_CH4 = q_ch4 * ef_ch4 * gwp_ch4
+    PE_flare = 0.0
+    LE_storage = q_ch4 * storage_factor * gwp_ch4
+
     PE = PE_EC + PE_CH4
     LE = LE_storage
     ER = baseline - PE - LE
-
-    utils.config.GWP_CH4 = orig_gwp_ch4
-    utils.config.GWP_N2O = orig_gwp_n2o
 
     return {
         'baseline': baseline,
@@ -243,8 +248,7 @@ def calcular_reducoes_com_parametros(
 def calcular_doc_k_ponderado(df_municipio):
     """
     Calcula DOC e k ponderados com base na caracterização dos resíduos (SNIS).
-    O DOCf agora é fixo (Tabela 7 da A6.4-AMT-003).
-    A temperatura NÃO influencia mais o DOCf.
+    O DOCf é fixo (Tabela 7 da A6.4-AMT-003) e depende da predominância de alimentos.
     """
     colunas_caract = {
         'Alimentos_Verdes': 'GTR1501',
