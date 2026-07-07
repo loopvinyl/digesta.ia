@@ -31,7 +31,7 @@ if 'df_potencial' not in st.session_state:
 # TÍTULO
 # =============================================================================
 st.title("⚡ Digesta.IA - Simulador de Créditos de Carbono")
-st.caption("Usina de Bioenergia e Biofertilizantes do IEE/USP | Metodologia: ACM0022 + TOOL14 + TOOL04 (UNFCCC)")
+st.caption("Usina de Bioenergia e Biofertilizantes do IEE/USP | Metodologia: UNFCCC A6.4-AMT-003 (2025) + TOOL14 + ACM0022 – IPCC AR5")
 
 # =============================================================================
 # ABA 1 – SIMULADOR
