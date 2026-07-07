@@ -109,14 +109,12 @@ with tab_simulador:
             index=0,
             help="O tipo define o fator de vazamento padrão do digestato (TOOL14) e o intervalo de oscilação para as análises."
         )
-        # Obter valor padrão e intervalo para o tipo selecionado
         storage_default = STORAGE_FACTOR_POR_TIPO.get(tipo_digestor, 0.20)
         storage_min, storage_max = STORAGE_FACTOR_RANGES.get(tipo_digestor, (0.0, 0.35))
         
         st.info(f"**Fator de vazamento padrão (TOOL14) para {tipo_digestor}: {storage_default*100:.0f}%**")
         st.caption(f"**Intervalo de oscilação (Sobol/MC):** {storage_min*100:.0f}% a {storage_max*100:.0f}%")
 
-        # Slider para ajuste MANUAL do storage_factor (sobrescreve o padrão)
         storage_factor_manual = st.slider(
             "Fator de vazamento do digestato (%) – ajuste manual (para o cálculo determinístico)",
             min_value=0,
@@ -128,7 +126,7 @@ with tab_simulador:
 
         anos_simulacao = st.slider("Anos de simulação", 5, 50, 20, 5)
 
-    # Escolha do tipo de resíduo para DOCf (Tabela 7 da A6.4-AMT-003)
+    # Escolha do tipo de resíduo para DOCf
     tipo_residuo = st.selectbox(
         "Tipo de resíduo (para DOCf – Tabela 7 da A6.4-AMT-003):",
         ["Alimentos (altamente decomponível)", "Papel (moderadamente decomponível)", "Madeira (pouco decomponível)", "Bulk (não especificado)"],
@@ -174,12 +172,10 @@ with tab_simulador:
                 "Pessimista (GWP-500)": (7.2, 130)
             }
 
-            # Parâmetros fixos para o cálculo determinístico
             doc_fixo = DOC_PADRAO
             k_fixo = K_PADRAO
             mcf = 1.0
 
-            # Dicionário para armazenar resultados de cada GWP
             resultados_gwp = {}
             for nome_gwp, (gwp_ch4, gwp_n2o) in gwps.items():
                 res = calcular_reducoes_com_parametros(
@@ -188,7 +184,7 @@ with tab_simulador:
                     doc=doc_fixo,
                     docf=docf_selecionado,
                     captura_metano=captura_metano_fixo,
-                    storage_factor=storage_factor_manual,  # Valor fixo escolhido pelo slider
+                    storage_factor=storage_factor_manual,
                     mcf=mcf,
                     tipo_digestor=tipo_digestor,
                     gwp_ch4=gwp_ch4,
@@ -196,7 +192,6 @@ with tab_simulador:
                 )
                 resultados_gwp[nome_gwp] = res
 
-            # Selecionar o cenário Otimista para os gráficos principais
             resultados = resultados_gwp["Otimista (GWP-20)"]
             baseline_total = resultados['baseline']
             pe_total = resultados['PE_total']
@@ -204,7 +199,7 @@ with tab_simulador:
             er_total = resultados['ER']
 
             # =============================================================
-            # 2. GERAR SÉRIES DIÁRIAS PARA GRÁFICOS (cenário otimista)
+            # 2. GERAR SÉRIES DIÁRIAS PARA GRÁFICOS
             # =============================================================
             baseline_serie = calcular_baseline_aterro_series(
                 massa_ano_kg, captura_metano_fixo, k_fixo, doc_fixo, docf_selecionado, mcf, anos_simulacao
@@ -267,7 +262,7 @@ with tab_simulador:
                 "Média anual (tCO₂e/ano)": lambda x: formatar_br(x)
             }))
 
-            # Valores financeiros (cenário otimista)
+            # Valores financeiros
             preco_carbono = st.session_state.preco_carbono
             moeda = st.session_state.moeda_carbono
             taxa_cambio = st.session_state.taxa_cambio
@@ -285,7 +280,7 @@ with tab_simulador:
                 st.metric("Receita em Reais", f"R$ {formatar_br(valor_brl)}",
                           help=f"{formatar_br(er_total)} tCO₂eq evitadas")
 
-            # Gráfico de barras: comparação anual
+            # Gráfico de barras
             st.subheader("📊 Comparação Anual das Emissões (Cenário Otimista)")
             fig, ax = plt.subplots(figsize=(10, 6))
             x = np.arange(len(df_anual['Year']))
@@ -326,7 +321,7 @@ with tab_simulador:
             plt.close(fig)
 
             # =============================================================
-            # 4. ANÁLISE DE SENSIBILIDADE SOBOL (4 PARÂMETROS – COM INTERVALO DINÂMICO)
+            # 4. ANÁLISE DE SENSIBILIDADE SOBOL (4 PARÂMETROS)
             # =============================================================
             st.subheader("🎯 Análise de Sensibilidade Global (Sobol) - GWP-20")
             st.info(f"**Parâmetros variados:** k, DOC, Captura, Storage_Factor (intervalo: {storage_min*100:.0f}% a {storage_max*100:.0f}%)")
@@ -335,10 +330,10 @@ with tab_simulador:
                 'num_vars': 4,
                 'names': ['k', 'DOC', 'captura', 'storage_factor'],
                 'bounds': [
-                    [0.06, 0.40],               # k
-                    [0.10, 0.25],               # DOC
-                    [0.0, 0.9],                 # captura de metano
-                    [storage_min, storage_max]  # Storage Factor – DINÂMICO conforme o tipo
+                    [0.06, 0.40],
+                    [0.10, 0.25],
+                    [0.0, 0.9],
+                    [storage_min, storage_max]
                 ]
             }
             param_values = sample(problem, n_samples, seed=50)
@@ -386,16 +381,14 @@ with tab_simulador:
             st.dataframe(df_sens.style.format({'S1': '{:.4f}', 'ST': '{:.4f}'}))
 
             # =============================================================
-            # 5. MONTE CARLO (5 PARÂMETROS – COM INTERVALO DINÂMICO)
+            # 5. MONTE CARLO
             # =============================================================
             st.subheader("🎲 Análise de Incerteza (Monte Carlo) - Comparação entre Cenários de GWP")
 
-            # Gerar parâmetros aleatórios com intervalos dinâmicos
             np.random.seed(50)
             k_mc = np.random.uniform(0.06, 0.40, n_simulations)
             DOC_mc = np.random.triangular(0.12, 0.15, 0.18, n_simulations)
             captura_mc = np.random.uniform(0.0, 0.9, n_simulations)
-            # STORAGE FACTOR – usa o intervalo dinâmico do tipo
             storage_mc = np.random.uniform(storage_min, storage_max, n_simulations)
             umidade_mc = np.random.uniform(0.75, 0.90, n_simulations)
             eficiencia_mc = np.random.uniform(0.30, 0.50, n_simulations)
@@ -421,7 +414,6 @@ with tab_simulador:
                     er_arr.append(res['ER'])
                 mc_results[nome_gwp] = np.array(er_arr)
 
-            # Gráfico de distribuições
             fig, ax = plt.subplots(figsize=(12, 6))
             for nome, arr in mc_results.items():
                 sns.kdeplot(arr, label=nome, ax=ax, linewidth=2)
@@ -434,7 +426,6 @@ with tab_simulador:
             st.pyplot(fig)
             plt.close(fig)
 
-            # Estatísticas descritivas
             stats_list = []
             for nome, arr in mc_results.items():
                 stats_list.append({
@@ -459,7 +450,6 @@ with tab_simulador:
             # 6. TESTES ESTATÍSTICOS
             # =============================================================
             st.subheader("📊 Testes Estatísticos")
-            # Diferença entre Otimista e Realista
             diff = mc_results["Otimista (GWP-20)"] - mc_results["Realista (GWP-100)"]
             shapiro_stat, shapiro_p = stats.shapiro(diff)
             t_stat, t_p = stats.ttest_1samp(diff, 0)
@@ -491,7 +481,6 @@ with tab_simulador:
 # =============================================================================
 # ABA 2 – IA (POTENCIAL POR LOCALIDADE)
 # =============================================================================
-# (Mantido exatamente como estava na versão anterior)
 with tab_ia:
     st.header("🧠 Análise de Potencial por Localidade (IA)")
     st.markdown("""
@@ -499,9 +488,6 @@ with tab_ia:
     ao implantar uma usina de bioenergia similar à do IEE/USP (digestão anaeróbica).
     """)
 
-    # =========================================================
-    # CARREGAR DADOS DO SNIS
-    # =========================================================
     @st.cache_data
     def load_data(ano):
         url = f"https://raw.githubusercontent.com/loopvinyl/digesta.ia/main/data/rsuBrasil_{ano}.xlsx"
@@ -514,17 +500,12 @@ with tab_ia:
             st.error(f"Erro ao carregar dados: {e}")
             return None
 
-    # =========================================================
-    # PARÂMETROS DA SIMULAÇÃO
-    # =========================================================
     col1, col2 = st.columns(2)
     with col1:
         ano_selecionado = st.selectbox("Selecione o ano de referência:", ["2023", "2024"], index=1)
         st.session_state.ano_ia = ano_selecionado
         tipo_digestor_ia = "CSTR"
-        # Para a IA, usamos o storage_factor padrão do CSTR (0.20)
         storage_factor_ia = STORAGE_FACTOR_POR_TIPO['CSTR']
-        digestato_armazenado_ia = True
 
     with col2:
         ordenar_por = st.selectbox(
@@ -534,9 +515,6 @@ with tab_ia:
         )
         top_n = st.slider("Mostrar os top N municípios:", 5, 50, 20, 5)
 
-    # =========================================================
-    # INICIALIZAR CLASSIFICADOR IA
-    # =========================================================
     with st.spinner("🤖 Inicializando o modelo de IA..."):
         from utils.ia_classificacao import ClassificadorDestinoIA, classificar_destino_regra
         classificador_ia = ClassificadorDestinoIA()
@@ -549,7 +527,6 @@ with tab_ia:
                 st.error("Não foi possível carregar os dados do SNIS.")
                 st.stop()
 
-            # Preparar colunas
             col_codigo = df.columns[16] if len(df.columns) > 16 else df.columns[0]
             col_municipio = df.columns[2] if len(df.columns) > 2 else df.columns[0]
             col_tipo_coleta = df.columns[17] if len(df.columns) > 17 else df.columns[0]
@@ -566,7 +543,6 @@ with tab_ia:
             })
             df["MASSA"] = pd.to_numeric(df["MASSA"], errors="coerce").fillna(0)
 
-            # Filtrar orgânicos
             mask_organica = df["TIPO_COLETA"].astype(str).str.contains(
                 "indiferenciada|orgânico|poda|galhada|verde", case=False, na=False, regex=True
             )
@@ -576,7 +552,6 @@ with tab_ia:
                 st.warning("Nenhum dado de coleta orgânica encontrado para este ano.")
                 st.stop()
 
-            # Treinar IA
             if not hasattr(classificador_ia, 'pipeline') or classificador_ia.pipeline is None:
                 with st.spinner("Treinando modelo de IA..."):
                     classificador_ia.treinar_com_dados_snis(df, "DESTINO")
@@ -635,7 +610,7 @@ with tab_ia:
                             doc=doc,
                             docf=docf,
                             captura_metano=captura,
-                            storage_factor=storage_factor_ia,  # Usa o fator padrão do tipo escolhido
+                            storage_factor=storage_factor_ia,
                             mcf=mcf,
                             tipo_digestor=tipo_digestor_ia
                         )
