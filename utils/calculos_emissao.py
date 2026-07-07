@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 from utils.config import *
 
 # =============================================================================
@@ -99,3 +100,53 @@ def calcular_reducoes(massa_ano_kg, captura_metano_baseline=0.0, doc=DOC_PADRAO,
         'ER': ER,
         'q_ch4': q_ch4
     }
+
+# =============================================================================
+# CÁLCULO DE DOC E K PONDERADOS (COM BASE NA CARACTERIZAÇÃO DO SNIS)
+# =============================================================================
+
+def calcular_doc_k_ponderado(df_municipio):
+    """
+    Calcula DOC e k ponderados com base na caracterização dos resíduos.
+    """
+    colunas_caract = {
+        'Alimentos_Verdes': 'GTR1501',
+        'Vidros': 'GTR1502',
+        'Metais': 'GTR1503',
+        'Plasticos': 'GTR1504',
+        'Papeis': 'GTR1505',
+        'Têxteis': 'GTR1506',
+        'Outros': 'GTR1507'
+    }
+    colunas_presentes = [col for col in colunas_caract.values() if col in df_municipio.columns]
+    if not colunas_presentes:
+        return DOC_PADRAO, K_PADRAO
+
+    df_caract = df_municipio[colunas_presentes].copy()
+    for col in df_caract.columns:
+        df_caract[col] = pd.to_numeric(df_caract[col], errors='coerce').fillna(0)
+
+    pct = {}
+    for nome, col in colunas_caract.items():
+        if col in df_caract.columns:
+            val = df_caract[col].mean()
+            pct[nome] = val if val > 0 else 0
+        else:
+            pct[nome] = 0
+
+    if sum(pct.values()) == 0:
+        return DOC_PADRAO, K_PADRAO
+
+    doc_pond = (pct['Alimentos_Verdes'] * 0.7 +
+                pct['Papeis'] * 0.5 +
+                pct['Têxteis'] * 0.24 +
+                pct['Outros'] * 0.1) / 100.0
+
+    k_pond = (pct['Alimentos_Verdes'] * 0.17 +
+              pct['Papeis'] * 0.07 +
+              pct['Têxteis'] * 0.07 +
+              pct['Outros'] * 0.035) / 100.0
+
+    doc_pond = max(doc_pond, DOC_PADRAO) if doc_pond > 0 else DOC_PADRAO
+    k_pond = max(k_pond, K_PADRAO) if k_pond > 0 else K_PADRAO
+    return doc_pond, k_pond
