@@ -2,16 +2,49 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from datetime import datetime
+import seaborn as sns
+from scipy import stats
+from scipy.signal import fftconvolve
+from joblib import Parallel, delayed
 import warnings
-warnings.filterwarnings("ignore")
+from matplotlib.ticker import FuncFormatter
+from SALib.sample.sobol import sample
+from SALib.analyze.sobol import analyze
+import yfinance as yf
+import requests
 
-# Configuração da página
+warnings.filterwarnings("ignore", category=FutureWarning)
+pd.set_option('display.max_columns', None)
+plt.rcParams['figure.dpi'] = 150
+plt.rcParams['font.size'] = 10
+sns.set_style("whitegrid")
+
+# =============================================================================
+# CONFIGURAÇÃO DA PÁGINA
+# =============================================================================
 st.set_page_config(page_title="Digesta.IA - Bioenergia IEE USP", layout="wide")
 
-# Importações dos módulos
+# =============================================================================
+# IMPORTAÇÕES DOS MÓDULOS INTERNOS
+# =============================================================================
 from utils.formatacao import *
-from utils.calculos_emissao import *
-from utils.config import *
+from utils.calculos_emissao import (
+    calcular_baseline_aterro_series,
+    calcular_emissoes_biodigestor_series,
+    calcular_reducoes_com_parametros,
+    estimar_metano_produzido,
+    calcular_doc_k_ponderado
+)
+from utils.config import (
+    GWP_CH4, GWP_N2O,
+    DOC_PADRAO, K_PADRAO,
+    DOCF_DEFAULT,
+    PHI_APPLICATION_B, OX_SOIL_COVER,
+    F_METHANE_FRACTION,
+    ANOS_PROJECAO
+)
+from utils.ia_classificacao import ClassificadorDestinoIA
 
 # =============================================================================
 # INICIALIZAÇÃO DO ESTADO DA SESSÃO
@@ -31,16 +64,32 @@ if 'df_potencial' not in st.session_state:
 # TÍTULO
 # =============================================================================
 st.title("⚡ Digesta.IA - Simulador de Créditos de Carbono")
-st.caption("Usina de Bioenergia e Biofertilizantes do IEE/USP | Metodologia: UNFCCC A6.4-AMT-003 (2025) + TOOL14 + ACM0022 – IPCC AR5")
+st.caption("Usina de Bioenergia e Biofertilizantes do IEE/USP | Metodologia: UNFCCC A6.4-AMT-003 (2025) + TOOL14 + ACM0022 | IPCC AR5")
 
 # =============================================================================
-# ABA 1 – SIMULADOR
+# ABAS
 # =============================================================================
 tab_simulador, tab_ia = st.tabs(["🧪 Simulador da Usina IEE", "🤖 Potencial por Localidade (IA)"])
 
+# =============================================================================
+# ABA 1 – SIMULADOR DA USINA IEE (VERSÃO AVANÇADA)
+# =============================================================================
 with tab_simulador:
-    st.header("📊 Simulador de Emissões e Créditos")
+    st.header("⚙️ Simulador Avançado – Usina IEE USP")
+    st.markdown("""
+    Esta ferramenta projeta as emissões de gases de efeito estufa e o potencial de créditos de carbono
+    para uma usina de **digestão anaeróbica** (biodigestor) que processa resíduos orgânicos.
 
+    **Inclui análise de sensibilidade global (Sobol) e incerteza (Monte Carlo)** com 4 parâmetros principais:
+    - Taxa de decaimento do aterro (k)
+    - Carbono orgânico degradável (DOC)
+    - Fração de carbono que se decompõe (DOCf) – fixa por tipo de resíduo (Tabela 7 da A6.4-AMT-003)
+    - Captura de metano no aterro
+    """)
+
+    # =============================================================
+    # PARÂMETROS DE ENTRADA
+    # =============================================================
     col1, col2 = st.columns(2)
     with col1:
         unidade = st.radio("Unidade de entrada:", ["kg/dia", "ton/ano"])
@@ -50,47 +99,369 @@ with tab_simulador:
         else:
             residuos_ton_ano = st.number_input("Resíduos (ton/ano)", min_value=1.0, max_value=100000.0, value=460.0, step=1.0)
             massa_ano_kg = residuos_ton_ano * 1000
-        captura_metano = st.slider("Captura de metano no aterro (%)", 0, 100, 65, 1) / 100
+        captura_metano_fixo = st.slider("Captura de metano no aterro (%)", 0, 100, 65, 1) / 100
+        st.caption("ℹ️ Para aterros com usina de biogás (ex: Caieiras), use ~65%.")
+
     with col2:
         tipo_digestor = st.selectbox("Tipo de biodigestor", ["CSTR", "UASB", "Lagoa coberta"])
-        digestato_armazenado = st.checkbox("Digestato armazenado anaerobicamente?", value=True)
-        anos_proj = st.slider("Anos de projeção", 5, 30, 20, 1)
+        digestato_armazenado = st.checkbox("Digestato armazenado anaerobicamente?", value=True,
+                                           help="Se marcado, considera emissões de CH₄ residual do digestato (TOOL14).")
+        anos_simulacao = st.slider("Anos de simulação", 5, 50, 20, 5)
 
-    if st.button("🚀 Executar Simulação", type="primary"):
-        with st.spinner("Calculando..."):
-            doc = DOC_PADRAO
-            k = K_PADRAO
+    # Escolha do tipo de resíduo para DOCf (Tabela 7 da A6.4-AMT-003)
+    tipo_residuo = st.selectbox(
+        "Tipo de resíduo (para DOCf – Tabela 7 da A6.4-AMT-003):",
+        ["Alimentos (altamente decomponível)", "Papel (moderadamente decomponível)", "Madeira (pouco decomponível)", "Bulk (não especificado)"],
+        index=0
+    )
+    mapa_docf = {
+        "Alimentos (altamente decomponível)": 0.7,
+        "Papel (moderadamente decomponível)": 0.5,
+        "Madeira (pouco decomponível)": 0.1,
+        "Bulk (não especificado)": 0.5
+    }
+    docf_selecionado = mapa_docf[tipo_residuo]
+
+    # =============================================================
+    # PARÂMETROS PARA ANÁLISE DE SENSIBILIDADE (SOBOL)
+    # =============================================================
+    st.subheader("📊 Parâmetros para Análise de Sensibilidade (Sobol)")
+    st.info("""
+    Os parâmetros abaixo serão variados na análise de sensibilidade global (Sobol) e Monte Carlo:
+    - **Taxa de decaimento (k)**: 0,06 a 0,40 ano⁻¹
+    - **Carbono orgânico degradável (DOC)**: 0,10 a 0,25
+    - **DOCf (Tabela 7)**: fixo por tipo de resíduo (não varia na Sobol)
+    - **Captura de metano**: 0% a 90%
+    """)
+    col3, col4 = st.columns(2)
+    with col3:
+        n_samples = st.slider("Número de amostras Sobol", 32, 256, 64, 16)
+    with col4:
+        n_simulations = st.slider("Número de simulações Monte Carlo", 50, 1000, 100, 50)
+
+    # =============================================================
+    # BOTÃO DE EXECUÇÃO
+    # =============================================================
+    if st.button("🚀 Executar Simulação Avançada", type="primary"):
+        with st.spinner("Executando simulação... Isso pode levar alguns segundos."):
+
+            # =============================================================
+            # 1. CÁLCULO DETERMINÍSTICO PARA CENÁRIOS DE GWP
+            # =============================================================
+            gwps = {
+                "Otimista (GWP-20)": (79.7, 273),
+                "Realista (GWP-100)": (27.0, 273),
+                "Pessimista (GWP-500)": (7.2, 130)
+            }
+
+            # Parâmetros fixos para o cálculo determinístico
+            doc_fixo = DOC_PADRAO
+            k_fixo = K_PADRAO
             mcf = 1.0
 
-            resultados = calcular_reducoes(massa_ano_kg, captura_metano, doc, k, mcf, tipo_digestor, digestato_armazenado)
+            # Dicionário para armazenar resultados de cada GWP
+            resultados_gwp = {}
+            for nome_gwp, (gwp_ch4, gwp_n2o) in gwps.items():
+                res = calcular_reducoes_com_parametros(
+                    massa_ano_kg,
+                    k=k_fixo,
+                    doc=doc_fixo,
+                    docf=docf_selecionado,
+                    captura_metano=captura_metano_fixo,
+                    mcf=mcf,
+                    tipo_digestor=tipo_digestor,
+                    digestato_armazenado=digestato_armazenado,
+                    gwp_ch4=gwp_ch4,
+                    gwp_n2o=gwp_n2o
+                )
+                resultados_gwp[nome_gwp] = res
 
-            st.subheader("📈 Resultados")
-            colA, colB, colC = st.columns(3)
-            colA.metric("Baseline (aterro)", f"{formatar_br(resultados['baseline'], auto_precision=False, casas_override=2)} tCO₂e")
-            colB.metric("Emissões do projeto (PE)", f"{formatar_br(resultados['PE_total'], auto_precision=False, casas_override=2)} tCO₂e")
-            colC.metric("Vazamentos (LE)", f"{formatar_br(resultados['LE_total'], auto_precision=False, casas_override=2)} tCO₂e")
-            st.metric("Redução líquida (ER)", f"{formatar_br(resultados['ER'], auto_precision=False, casas_override=2)} tCO₂e")
+            # Selecionar o cenário Otimista para os gráficos principais
+            resultados = resultados_gwp["Otimista (GWP-20)"]
+            baseline_total = resultados['baseline']
+            pe_total = resultados['PE_total']
+            le_total = resultados['LE_total']
+            er_total = resultados['ER']
 
-            with st.expander("📋 Detalhamento das emissões"):
-                st.write(f"**CH4 produzido:** {formatar_br(resultados['q_ch4'], auto_precision=False, casas_override=2)} t")
-                st.write(f"**PE_EC (eletricidade):** {formatar_br(resultados['PE_EC'], auto_precision=False, casas_override=2)} tCO₂e")
-                st.write(f"**PE_CH4 (vazamento do digester):** {formatar_br(resultados['PE_CH4'], auto_precision=False, casas_override=2)} tCO₂e")
-                st.write(f"**LE_storage (digestato):** {formatar_br(resultados['LE_storage'], auto_precision=False, casas_override=2)} tCO₂e")
+            # =============================================================
+            # 2. GERAR SÉRIES DIÁRIAS PARA GRÁFICOS (cenário otimista)
+            # =============================================================
+            baseline_serie = calcular_baseline_aterro_series(
+                massa_ano_kg, captura_metano_fixo, k_fixo, doc_fixo, docf_selecionado, mcf, anos_simulacao
+            )
+            q_ch4 = estimar_metano_produzido(massa_ano_kg)
+            emissoes_biodigestor = calcular_emissoes_biodigestor_series(
+                q_ch4, tipo_digestor, digestato_armazenado, anos_simulacao
+            )
+            pe_serie = emissoes_biodigestor['PE_total']
+            le_serie = emissoes_biodigestor['LE_total']
+            er_serie = baseline_serie - pe_serie - le_serie
 
+            dias = anos_simulacao * 365
+            datas = pd.date_range(start=datetime.now(), periods=dias, freq='D')
+            df_diario = pd.DataFrame({
+                'Data': datas,
+                'Baseline': baseline_serie,
+                'Projeto': pe_serie,
+                'Vazamento': le_serie,
+                'Reducao': er_serie
+            })
+            df_diario['Year'] = df_diario['Data'].dt.year
+
+            df_anual = df_diario.groupby('Year').agg({
+                'Baseline': 'sum',
+                'Projeto': 'sum',
+                'Vazamento': 'sum',
+                'Reducao': 'sum'
+            }).reset_index()
+            df_anual['Reducao_Acumulada'] = df_anual['Reducao'].cumsum()
+
+            # =============================================================
+            # 3. EXIBIÇÃO DE RESULTADOS DETERMINÍSTICOS
+            # =============================================================
+            st.header("📈 Resultados da Simulação")
+            st.info(f"""
+            **Parâmetros utilizados:**
+            - Resíduos: {formatar_br(residuos_kg_dia)} kg/dia ({formatar_br(massa_ano_kg/1000)} t/ano)
+            - Captura de metano no aterro: {formatar_br(captura_metano_fixo*100)}%
+            - Tipo de biodigestor: {tipo_digestor}
+            - Digestato armazenado: {'Sim' if digestato_armazenado else 'Não'}
+            - Anos de simulação: {anos_simulacao}
+            - k = {formatar_br(k_fixo)} ano⁻¹
+            - DOC = {formatar_br(doc_fixo)}
+            - DOCf (Tabela 7) = {formatar_br(docf_selecionado)} → {tipo_residuo}
+            """)
+
+            st.subheader("📊 Comparação entre Cenários de GWP")
+            comp_gwp = []
+            for nome, res in resultados_gwp.items():
+                comp_gwp.append({
+                    "Cenário": nome,
+                    "Redução Líquida (tCO₂e)": res['ER'],
+                    "Média anual (tCO₂e/ano)": res['ER'] / anos_simulacao
+                })
+            df_comp_gwp = pd.DataFrame(comp_gwp)
+            st.dataframe(df_comp_gwp.style.format({
+                "Redução Líquida (tCO₂e)": lambda x: formatar_br(x),
+                "Média anual (tCO₂e/ano)": lambda x: formatar_br(x)
+            }))
+
+            # Valores financeiros (cenário otimista)
             preco_carbono = st.session_state.preco_carbono
-            cambio = st.session_state.taxa_cambio
-            receita = resultados['ER'] * preco_carbono * cambio
-            st.metric("💰 Receita potencial anual", f"R$ {formatar_br(receita, auto_precision=False, casas_override=2)}")
+            moeda = st.session_state.moeda_carbono
+            taxa_cambio = st.session_state.taxa_cambio
+            valor_eur = er_total * preco_carbono
+            valor_brl = er_total * preco_carbono * taxa_cambio
 
-            fig, ax = plt.subplots(figsize=(8, 4))
-            ax.bar(["Baseline", "Projeto", "Vazamento"], [resultados['baseline'], resultados['PE_total'], resultados['LE_total']],
-                   color=['red', 'orange', 'blue'])
-            ax.set_ylabel("tCO₂e")
-            ax.set_title("Comparação de emissões")
+            st.subheader("💰 Valor Financeiro das Emissões Evitadas (Cenário Otimista)")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Preço Carbono (Euro)", f"{moeda} {formatar_br(preco_carbono)}/tCO₂eq")
+            with col2:
+                st.metric("Receita em Euro", f"{moeda} {formatar_br(valor_eur)}",
+                          help=f"{formatar_br(er_total)} tCO₂eq evitadas")
+            with col3:
+                st.metric("Receita em Reais", f"R$ {formatar_br(valor_brl)}",
+                          help=f"{formatar_br(er_total)} tCO₂eq evitadas")
+
+            # Gráfico de barras: comparação anual
+            st.subheader("📊 Comparação Anual das Emissões (Cenário Otimista)")
+            fig, ax = plt.subplots(figsize=(10, 6))
+            x = np.arange(len(df_anual['Year']))
+            width = 0.25
+            ax.bar(x - width, df_anual['Baseline'], width, label='Baseline (Aterro)', color='red', edgecolor='black')
+            ax.bar(x, df_anual['Projeto'], width, label='Projeto (Biodigestor)', color='orange', edgecolor='black')
+            ax.bar(x + width, df_anual['Vazamento'], width, label='Vazamento (Digestato)', color='blue', edgecolor='black')
+            for i, (b, p, v) in enumerate(zip(df_anual['Baseline'], df_anual['Projeto'], df_anual['Vazamento'])):
+                ax.text(i - width, b + max(b, p, v)*0.01, formatar_br(b), ha='center', fontsize=8)
+                ax.text(i, p + max(b, p, v)*0.01, formatar_br(p), ha='center', fontsize=8)
+                ax.text(i + width, v + max(b, p, v)*0.01, formatar_br(v), ha='center', fontsize=8)
+            ax.set_xlabel('Ano')
+            ax.set_ylabel('tCO₂e')
+            ax.set_title('Comparação Anual: Baseline vs Projeto vs Vazamento')
+            ax.set_xticks(x)
+            ax.set_xticklabels(df_anual['Year'])
+            ax.legend()
+            ax.yaxis.set_major_formatter(FuncFormatter(br_format))
             st.pyplot(fig)
+            plt.close(fig)
+
+            # Gráfico de redução acumulada
+            st.subheader("📉 Redução de Emissões Acumulada (Cenário Otimista)")
+            fig, ax = plt.subplots(figsize=(10, 6))
+            ax.plot(datas, df_diario['Baseline'].cumsum(), 'r-', label='Baseline (Aterro)', linewidth=2)
+            ax.plot(datas, (df_diario['Projeto'] + df_diario['Vazamento']).cumsum(), 'b-', label='Projeto + Vazamento', linewidth=2)
+            ax.fill_between(datas,
+                            (df_diario['Projeto'] + df_diario['Vazamento']).cumsum(),
+                            df_diario['Baseline'].cumsum(),
+                            color='skyblue', alpha=0.5, label='Emissões Evitadas')
+            ax.set_title(f'Redução de Emissões em {anos_simulacao} Anos (k = {formatar_br(k_fixo)} ano⁻¹)')
+            ax.set_xlabel('Data')
+            ax.set_ylabel('tCO₂e Acumulado')
+            ax.legend()
+            ax.grid(True, linestyle='--', alpha=0.7)
+            ax.yaxis.set_major_formatter(FuncFormatter(br_format))
+            st.pyplot(fig)
+            plt.close(fig)
+
+            # =============================================================
+            # 4. ANÁLISE DE SENSIBILIDADE SOBOL (3 PARÂMETROS – DOCf é fixo)
+            # =============================================================
+            st.subheader("🎯 Análise de Sensibilidade Global (Sobol) - GWP-20")
+            st.info("**Parâmetros variados:** k, DOC, Captura de metano (DOCf é fixo por tipo de resíduo)")
+
+            problem = {
+                'num_vars': 3,
+                'names': ['k', 'DOC', 'captura'],
+                'bounds': [[0.06, 0.40], [0.10, 0.25], [0.0, 0.9]]
+            }
+            param_values = sample(problem, n_samples, seed=50)
+            gwp20_ch4, gwp20_n2o = gwps["Otimista (GWP-20)"]
+
+            def executar_biodigestor_sobol(params):
+                k_sobol, DOC_sobol, captura_sobol = params
+                res = calcular_reducoes_com_parametros(
+                    massa_ano_kg,
+                    k=k_sobol,
+                    doc=DOC_sobol,
+                    docf=docf_selecionado,
+                    captura_metano=captura_sobol,
+                    mcf=1.0,
+                    tipo_digestor=tipo_digestor,
+                    digestato_armazenado=digestato_armazenado,
+                    gwp_ch4=gwp20_ch4,
+                    gwp_n2o=gwp20_n2o
+                )
+                return res['ER']
+
+            with st.spinner("Calculando índices Sobol..."):
+                results_sobol = Parallel(n_jobs=1)(
+                    delayed(executar_biodigestor_sobol)(p) for p in param_values
+                )
+                Si = analyze(problem, np.array(results_sobol), print_to_console=False)
+
+            df_sens = pd.DataFrame({
+                'Parâmetro': ['Taxa de Decaimento (k)', 'DOC', 'Captura de Metano'],
+                'S1': Si['S1'],
+                'ST': Si['ST']
+            }).sort_values('ST', ascending=False)
+
+            fig, ax = plt.subplots(figsize=(10, 6))
+            sns.barplot(x='ST', y='Parâmetro', data=df_sens, palette='viridis', ax=ax)
+            ax.set_title('Sensibilidade Global - Redução Líquida (GWP-20)')
+            ax.set_xlabel('Índice ST (Sobol Total)')
+            ax.set_ylabel('Parâmetro')
+            ax.grid(axis='x', linestyle='--', alpha=0.7)
+            ax.xaxis.set_major_formatter(FuncFormatter(br_format))
+            for i, st_val in enumerate(df_sens['ST']):
+                ax.text(st_val, i, f' {formatar_br(st_val)}', va='center', fontweight='bold')
+            st.pyplot(fig)
+            plt.close(fig)
+            st.dataframe(df_sens.style.format({'S1': '{:.4f}', 'ST': '{:.4f}'}))
+
+            # =============================================================
+            # 5. MONTE CARLO (5 PARÂMETROS – DOCf fixo)
+            # =============================================================
+            st.subheader("🎲 Análise de Incerteza (Monte Carlo) - Comparação entre Cenários de GWP")
+
+            # Gerar parâmetros aleatórios
+            np.random.seed(50)
+            k_mc = np.random.uniform(0.06, 0.40, n_simulations)
+            DOC_mc = np.random.triangular(0.12, 0.15, 0.18, n_simulations)
+            captura_mc = np.random.uniform(0.0, 0.9, n_simulations)
+            umidade_mc = np.random.uniform(0.75, 0.90, n_simulations)
+            eficiencia_mc = np.random.uniform(0.30, 0.50, n_simulations)
+
+            mc_results = {}
+            for nome_gwp, (gwp_ch4, gwp_n2o) in gwps.items():
+                er_arr = []
+                for i in range(n_simulations):
+                    res = calcular_reducoes_com_parametros(
+                        massa_ano_kg,
+                        k=k_mc[i],
+                        doc=DOC_mc[i],
+                        docf=docf_selecionado,
+                        captura_metano=captura_mc[i],
+                        eficiencia_motor=eficiencia_mc[i],
+                        umidade=umidade_mc[i],
+                        mcf=1.0,
+                        tipo_digestor=tipo_digestor,
+                        digestato_armazenado=digestato_armazenado,
+                        gwp_ch4=gwp_ch4,
+                        gwp_n2o=gwp_n2o
+                    )
+                    er_arr.append(res['ER'])
+                mc_results[nome_gwp] = np.array(er_arr)
+
+            # Gráfico de distribuições
+            fig, ax = plt.subplots(figsize=(12, 6))
+            for nome, arr in mc_results.items():
+                sns.kdeplot(arr, label=nome, ax=ax, linewidth=2)
+            ax.set_title('Distribuição da Redução Líquida de Emissões (Monte Carlo)')
+            ax.set_xlabel('Redução Líquida (tCO₂e)')
+            ax.set_ylabel('Densidade')
+            ax.legend()
+            ax.grid(alpha=0.3)
+            ax.xaxis.set_major_formatter(FuncFormatter(br_format))
+            st.pyplot(fig)
+            plt.close(fig)
+
+            # Estatísticas descritivas
+            stats_list = []
+            for nome, arr in mc_results.items():
+                stats_list.append({
+                    "Cenário": nome,
+                    "Média (tCO₂e)": np.mean(arr),
+                    "Mediana (tCO₂e)": np.median(arr),
+                    "Desvio Padrão": np.std(arr),
+                    "IC 95% Inferior": np.percentile(arr, 2.5),
+                    "IC 95% Superior": np.percentile(arr, 97.5)
+                })
+            df_mc_stats = pd.DataFrame(stats_list)
+            st.subheader("📊 Estatísticas do Monte Carlo")
+            st.dataframe(df_mc_stats.style.format({
+                "Média (tCO₂e)": lambda x: formatar_br(x),
+                "Mediana (tCO₂e)": lambda x: formatar_br(x),
+                "Desvio Padrão": lambda x: formatar_br(x),
+                "IC 95% Inferior": lambda x: formatar_br(x),
+                "IC 95% Superior": lambda x: formatar_br(x)
+            }))
+
+            # =============================================================
+            # 6. TESTES ESTATÍSTICOS
+            # =============================================================
+            st.subheader("📊 Testes Estatísticos")
+            # Diferença entre Otimista e Realista
+            diff = mc_results["Otimista (GWP-20)"] - mc_results["Realista (GWP-100)"]
+            shapiro_stat, shapiro_p = stats.shapiro(diff)
+            t_stat, t_p = stats.ttest_1samp(diff, 0)
+            st.write(f"**Diferença Otimista – Realista:** média = {formatar_br(np.mean(diff))} tCO₂e")
+            st.write(f"**Shapiro-Wilk (normalidade):** estatística = {shapiro_stat:.5f}, p = {shapiro_p:.5f}")
+            st.write(f"**Teste t (média ≠ 0):** t = {t_stat:.5f}, p = {t_p:.5f}")
+
+            # =============================================================
+            # 7. RESULTADOS ANUAIS E DOWNLOAD
+            # =============================================================
+            st.subheader("📋 Resultados Anuais (Cenário Otimista)")
+            df_anual_fmt = df_anual.copy()
+            for col in ['Baseline', 'Projeto', 'Vazamento', 'Reducao']:
+                df_anual_fmt[col] = df_anual_fmt[col].apply(lambda x: formatar_br(x))
+            st.dataframe(df_anual_fmt)
+
+            csv = df_anual.to_csv(index=False)
+            st.download_button(
+                label="📥 Baixar resultados anuais (CSV)",
+                data=csv,
+                file_name="resultados_usina_iee.csv",
+                mime="text/csv"
+            )
+
+    else:
+        st.info("💡 Ajuste os parâmetros acima e clique em **Executar Simulação Avançada** para ver os resultados.")
+
 
 # =============================================================================
-# ABA 2 – IA (POTENCIAL POR LOCALIDADE) – CÓDIGO COMPLETO
+# ABA 2 – IA (POTENCIAL POR LOCALIDADE)
 # =============================================================================
 with tab_ia:
     st.header("🧠 Análise de Potencial por Localidade (IA)")
@@ -201,7 +572,8 @@ with tab_ia:
 
             df_org["MCF"], df_org["CAPTURA"] = zip(*df_org["DESTINO_CLASSIFICADO"].apply(obter_parametros_destino))
 
-            from utils.calculos_emissao import calcular_reducoes, calcular_doc_k_ponderado
+            # Usar as funções de cálculo já atualizadas (com docf fixo)
+            from utils.calculos_emissao import calcular_reducoes_com_parametros, calcular_doc_k_ponderado
 
             resultados_municipios = []
             total_municipios = len(df_org["MUNICIPIO"].unique())
@@ -217,7 +589,8 @@ with tab_ia:
                 if massa_total <= 0:
                     continue
 
-                doc, k = calcular_doc_k_ponderado(df_mun)
+                # Obter DOC, k e docf ponderados
+                doc, k, docf = calcular_doc_k_ponderado(df_mun)
 
                 for _, row in df_mun.iterrows():
                     massa_rota = row["MASSA"]
@@ -227,11 +600,12 @@ with tab_ia:
                     captura = row["CAPTURA"]
 
                     try:
-                        resultado = calcular_reducoes(
+                        resultado = calcular_reducoes_com_parametros(
                             massa_ano_kg=massa_rota * 1000,
-                            captura_metano_baseline=captura,
-                            doc=doc,
                             k=k,
+                            doc=doc,
+                            docf=docf,
+                            captura_metano=captura,
                             mcf=mcf,
                             tipo_digestor=tipo_digestor_ia,
                             digestato_armazenado=digestato_armazenado_ia
@@ -334,6 +708,7 @@ with tab_ia:
             for i, (idx, row) in enumerate(top10.iterrows()):
                 ax.text(row["ER"] + 1, i, formatar_br(row["ER"], auto_precision=False, casas_override=0), va="center", fontsize=9)
             st.pyplot(fig)
+            plt.close(fig)
 
             st.subheader("📊 Potencial por Estado (UF)")
             df_uf = df_agg.groupby("UF").agg({
@@ -352,6 +727,7 @@ with tab_ia:
             for i, (_, row) in enumerate(df_uf.iterrows()):
                 ax2.text(i, row["ER"] + max(df_uf["ER"])*0.01, formatar_br(row["ER"], auto_precision=False, casas_override=0), ha="center", fontsize=9)
             st.pyplot(fig2)
+            plt.close(fig2)
 
             st.subheader("📥 Exportar resultados")
             csv = df_agg.to_csv(index=False, encoding="utf-8")
@@ -369,6 +745,17 @@ with tab_ia:
             - **Vazamento (LE)**: emissões do digestato se armazenado anaerobicamente.  
             - **Redução Líquida (ER)**: é o potencial de créditos de carbono.  
             - Municípios com maior **ER** têm maior potencial de gerar receita com créditos de carbono.
+            - **DOCf** é fixo por tipo de resíduo (Tabela 7 da A6.4-AMT-003) – calculado com base na caracterização do SNIS.
             """)
 
             st.session_state.df_potencial = df_agg
+
+
+# =============================================================================
+# RODAPÉ
+# =============================================================================
+st.markdown("---")
+st.caption("""
+**Digesta.IA** | Ferramenta de apoio à gestão de resíduos sólidos e créditos de carbono  
+Dados: SNIS (2023/2024) | Metodologia: UNFCCC A6.4-AMT-003 (2025) + TOOL14 + ACM0022 | IPCC AR5 (GWP-100)
+""")
