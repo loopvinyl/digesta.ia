@@ -8,7 +8,7 @@
 GWP_CH4 = 28.0
 GWP_N2O = 265.0
 
-# TOOL04 – Baseline (aterro) – Application B (clima úmido)
+# UNFCCC A6.4-AMT-003 (2025) – Baseline (aterro) – Application B (clima úmido)
 PHI_APPLICATION_B = 0.85
 OX_SOIL_COVER = 0.383          # aterro com cobertura de solo
 F_METHANE_FRACTION = 0.5
