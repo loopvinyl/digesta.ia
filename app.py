@@ -5,14 +5,11 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 import seaborn as sns
 from scipy import stats
-from scipy.signal import fftconvolve
 from joblib import Parallel, delayed
 import warnings
 from matplotlib.ticker import FuncFormatter
 from SALib.sample.sobol import sample
 from SALib.analyze.sobol import analyze
-import yfinance as yf
-import requests
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 pd.set_option('display.max_columns', None)
@@ -40,6 +37,8 @@ from utils.config import (
     GWP_CH4, GWP_N2O,
     DOC_PADRAO, K_PADRAO,
     DOCF_DEFAULT,
+    STORAGE_FACTOR_POR_TIPO,
+    STORAGE_FACTOR_RANGES,
     PHI_APPLICATION_B, OX_SOIL_COVER,
     F_METHANE_FRACTION,
     ANOS_PROJECAO
@@ -80,11 +79,12 @@ with tab_simulador:
     Esta ferramenta projeta as emissões de gases de efeito estufa e o potencial de créditos de carbono
     para uma usina de **digestão anaeróbica** (biodigestor) que processa resíduos orgânicos.
 
-    **Inclui análise de sensibilidade global (Sobol) e incerteza (Monte Carlo)** com 4 parâmetros principais:
+    **Inclui análise de sensibilidade global (Sobol) e incerteza (Monte Carlo)** com os seguintes parâmetros:
     - Taxa de decaimento do aterro (k)
     - Carbono orgânico degradável (DOC)
     - Fração de carbono que se decompõe (DOCf) – fixa por tipo de resíduo (Tabela 7 da A6.4-AMT-003)
     - Captura de metano no aterro
+    - **Fator de vazamento do digestato** (storage_factor) – oscila em torno do valor padrão do tipo de digestor (TOOL14)
     """)
 
     # =============================================================
@@ -103,9 +103,29 @@ with tab_simulador:
         st.caption("ℹ️ Para aterros com usina de biogás (ex: Caieiras), use ~65%.")
 
     with col2:
-        tipo_digestor = st.selectbox("Tipo de biodigestor", ["CSTR", "UASB", "Lagoa coberta"])
-        digestato_armazenado = st.checkbox("Digestato armazenado anaerobicamente?", value=True,
-                                           help="Se marcado, considera emissões de CH₄ residual do digestato (TOOL14).")
+        tipo_digestor = st.selectbox(
+            "Tipo de biodigestor",
+            ["CSTR", "UASB", "Lagoa coberta"],
+            index=0,
+            help="O tipo define o fator de vazamento padrão do digestato (TOOL14) e o intervalo de oscilação para as análises."
+        )
+        # Obter valor padrão e intervalo para o tipo selecionado
+        storage_default = STORAGE_FACTOR_POR_TIPO.get(tipo_digestor, 0.20)
+        storage_min, storage_max = STORAGE_FACTOR_RANGES.get(tipo_digestor, (0.0, 0.35))
+        
+        st.info(f"**Fator de vazamento padrão (TOOL14) para {tipo_digestor}: {storage_default*100:.0f}%**")
+        st.caption(f"**Intervalo de oscilação (Sobol/MC):** {storage_min*100:.0f}% a {storage_max*100:.0f}%")
+
+        # Slider para ajuste MANUAL do storage_factor (sobrescreve o padrão)
+        storage_factor_manual = st.slider(
+            "Fator de vazamento do digestato (%) – ajuste manual (para o cálculo determinístico)",
+            min_value=0,
+            max_value=50,
+            value=int(storage_default*100),
+            step=1,
+            help="Valor fixo usado no cálculo determinístico. A análise Sobol/MC usará o intervalo dinâmico acima."
+        ) / 100.0
+
         anos_simulacao = st.slider("Anos de simulação", 5, 50, 20, 5)
 
     # Escolha do tipo de resíduo para DOCf (Tabela 7 da A6.4-AMT-003)
@@ -126,12 +146,12 @@ with tab_simulador:
     # PARÂMETROS PARA ANÁLISE DE SENSIBILIDADE (SOBOL)
     # =============================================================
     st.subheader("📊 Parâmetros para Análise de Sensibilidade (Sobol)")
-    st.info("""
-    Os parâmetros abaixo serão variados na análise de sensibilidade global (Sobol) e Monte Carlo:
+    st.info(f"""
+    Os parâmetros abaixo serão variados nas análises Sobol e Monte Carlo.
     - **Taxa de decaimento (k)**: 0,06 a 0,40 ano⁻¹
     - **Carbono orgânico degradável (DOC)**: 0,10 a 0,25
-    - **DOCf (Tabela 7)**: fixo por tipo de resíduo (não varia na Sobol)
     - **Captura de metano**: 0% a 90%
+    - **Fator de vazamento do digestato**: **{storage_min*100:.0f}% a {storage_max*100:.0f}%** (intervalo dinâmico para {tipo_digestor})
     """)
     col3, col4 = st.columns(2)
     with col3:
@@ -168,9 +188,9 @@ with tab_simulador:
                     doc=doc_fixo,
                     docf=docf_selecionado,
                     captura_metano=captura_metano_fixo,
+                    storage_factor=storage_factor_manual,  # Valor fixo escolhido pelo slider
                     mcf=mcf,
                     tipo_digestor=tipo_digestor,
-                    digestato_armazenado=digestato_armazenado,
                     gwp_ch4=gwp_ch4,
                     gwp_n2o=gwp_n2o
                 )
@@ -191,7 +211,7 @@ with tab_simulador:
             )
             q_ch4 = estimar_metano_produzido(massa_ano_kg)
             emissoes_biodigestor = calcular_emissoes_biodigestor_series(
-                q_ch4, tipo_digestor, digestato_armazenado, anos_simulacao
+                q_ch4, tipo_digestor, storage_factor_manual, anos_simulacao
             )
             pe_serie = emissoes_biodigestor['PE_total']
             le_serie = emissoes_biodigestor['LE_total']
@@ -225,7 +245,8 @@ with tab_simulador:
             - Resíduos: {formatar_br(residuos_kg_dia)} kg/dia ({formatar_br(massa_ano_kg/1000)} t/ano)
             - Captura de metano no aterro: {formatar_br(captura_metano_fixo*100)}%
             - Tipo de biodigestor: {tipo_digestor}
-            - Digestato armazenado: {'Sim' if digestato_armazenado else 'Não'}
+            - Fator de vazamento do digestato (determinístico): {formatar_br(storage_factor_manual*100)}%
+            - Intervalo de oscilação (Sobol/MC): {storage_min*100:.0f}% a {storage_max*100:.0f}%
             - Anos de simulação: {anos_simulacao}
             - k = {formatar_br(k_fixo)} ano⁻¹
             - DOC = {formatar_br(doc_fixo)}
@@ -305,30 +326,35 @@ with tab_simulador:
             plt.close(fig)
 
             # =============================================================
-            # 4. ANÁLISE DE SENSIBILIDADE SOBOL (3 PARÂMETROS – DOCf é fixo)
+            # 4. ANÁLISE DE SENSIBILIDADE SOBOL (4 PARÂMETROS – COM INTERVALO DINÂMICO)
             # =============================================================
             st.subheader("🎯 Análise de Sensibilidade Global (Sobol) - GWP-20")
-            st.info("**Parâmetros variados:** k, DOC, Captura de metano (DOCf é fixo por tipo de resíduo)")
+            st.info(f"**Parâmetros variados:** k, DOC, Captura, Storage_Factor (intervalo: {storage_min*100:.0f}% a {storage_max*100:.0f}%)")
 
             problem = {
-                'num_vars': 3,
-                'names': ['k', 'DOC', 'captura'],
-                'bounds': [[0.06, 0.40], [0.10, 0.25], [0.0, 0.9]]
+                'num_vars': 4,
+                'names': ['k', 'DOC', 'captura', 'storage_factor'],
+                'bounds': [
+                    [0.06, 0.40],               # k
+                    [0.10, 0.25],               # DOC
+                    [0.0, 0.9],                 # captura de metano
+                    [storage_min, storage_max]  # Storage Factor – DINÂMICO conforme o tipo
+                ]
             }
             param_values = sample(problem, n_samples, seed=50)
             gwp20_ch4, gwp20_n2o = gwps["Otimista (GWP-20)"]
 
             def executar_biodigestor_sobol(params):
-                k_sobol, DOC_sobol, captura_sobol = params
+                k_sobol, DOC_sobol, captura_sobol, storage_sobol = params
                 res = calcular_reducoes_com_parametros(
                     massa_ano_kg,
                     k=k_sobol,
                     doc=DOC_sobol,
                     docf=docf_selecionado,
                     captura_metano=captura_sobol,
+                    storage_factor=storage_sobol,
                     mcf=1.0,
                     tipo_digestor=tipo_digestor,
-                    digestato_armazenado=digestato_armazenado,
                     gwp_ch4=gwp20_ch4,
                     gwp_n2o=gwp20_n2o
                 )
@@ -341,7 +367,7 @@ with tab_simulador:
                 Si = analyze(problem, np.array(results_sobol), print_to_console=False)
 
             df_sens = pd.DataFrame({
-                'Parâmetro': ['Taxa de Decaimento (k)', 'DOC', 'Captura de Metano'],
+                'Parâmetro': ['Taxa de Decaimento (k)', 'DOC', 'Captura de Metano', 'Fator de Vazamento'],
                 'S1': Si['S1'],
                 'ST': Si['ST']
             }).sort_values('ST', ascending=False)
@@ -360,15 +386,17 @@ with tab_simulador:
             st.dataframe(df_sens.style.format({'S1': '{:.4f}', 'ST': '{:.4f}'}))
 
             # =============================================================
-            # 5. MONTE CARLO (5 PARÂMETROS – DOCf fixo)
+            # 5. MONTE CARLO (5 PARÂMETROS – COM INTERVALO DINÂMICO)
             # =============================================================
             st.subheader("🎲 Análise de Incerteza (Monte Carlo) - Comparação entre Cenários de GWP")
 
-            # Gerar parâmetros aleatórios
+            # Gerar parâmetros aleatórios com intervalos dinâmicos
             np.random.seed(50)
             k_mc = np.random.uniform(0.06, 0.40, n_simulations)
             DOC_mc = np.random.triangular(0.12, 0.15, 0.18, n_simulations)
             captura_mc = np.random.uniform(0.0, 0.9, n_simulations)
+            # STORAGE FACTOR – usa o intervalo dinâmico do tipo
+            storage_mc = np.random.uniform(storage_min, storage_max, n_simulations)
             umidade_mc = np.random.uniform(0.75, 0.90, n_simulations)
             eficiencia_mc = np.random.uniform(0.30, 0.50, n_simulations)
 
@@ -382,11 +410,11 @@ with tab_simulador:
                         doc=DOC_mc[i],
                         docf=docf_selecionado,
                         captura_metano=captura_mc[i],
+                        storage_factor=storage_mc[i],
                         eficiencia_motor=eficiencia_mc[i],
                         umidade=umidade_mc[i],
                         mcf=1.0,
                         tipo_digestor=tipo_digestor,
-                        digestato_armazenado=digestato_armazenado,
                         gwp_ch4=gwp_ch4,
                         gwp_n2o=gwp_n2o
                     )
@@ -463,6 +491,7 @@ with tab_simulador:
 # =============================================================================
 # ABA 2 – IA (POTENCIAL POR LOCALIDADE)
 # =============================================================================
+# (Mantido exatamente como estava na versão anterior)
 with tab_ia:
     st.header("🧠 Análise de Potencial por Localidade (IA)")
     st.markdown("""
@@ -493,6 +522,8 @@ with tab_ia:
         ano_selecionado = st.selectbox("Selecione o ano de referência:", ["2023", "2024"], index=1)
         st.session_state.ano_ia = ano_selecionado
         tipo_digestor_ia = "CSTR"
+        # Para a IA, usamos o storage_factor padrão do CSTR (0.20)
+        storage_factor_ia = STORAGE_FACTOR_POR_TIPO['CSTR']
         digestato_armazenado_ia = True
 
     with col2:
@@ -572,7 +603,6 @@ with tab_ia:
 
             df_org["MCF"], df_org["CAPTURA"] = zip(*df_org["DESTINO_CLASSIFICADO"].apply(obter_parametros_destino))
 
-            # Usar as funções de cálculo já atualizadas (com docf fixo)
             from utils.calculos_emissao import calcular_reducoes_com_parametros, calcular_doc_k_ponderado
 
             resultados_municipios = []
@@ -589,7 +619,6 @@ with tab_ia:
                 if massa_total <= 0:
                     continue
 
-                # Obter DOC, k e docf ponderados
                 doc, k, docf = calcular_doc_k_ponderado(df_mun)
 
                 for _, row in df_mun.iterrows():
@@ -606,9 +635,9 @@ with tab_ia:
                             doc=doc,
                             docf=docf,
                             captura_metano=captura,
+                            storage_factor=storage_factor_ia,  # Usa o fator padrão do tipo escolhido
                             mcf=mcf,
-                            tipo_digestor=tipo_digestor_ia,
-                            digestato_armazenado=digestato_armazenado_ia
+                            tipo_digestor=tipo_digestor_ia
                         )
                     except Exception as e:
                         continue
