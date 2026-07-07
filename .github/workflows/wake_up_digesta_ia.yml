@@ -1,0 +1,14 @@
+name: Wake up Digesta.IA
+
+on:
+  schedule:
+    - cron: '0 6 * * *'        # Executa todos os dias às 6h UTC (3h da manhã em Brasília)
+  workflow_dispatch:           # Permite executar manualmente pela interface do GitHub
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Streamlit App
+        run: |
+          curl -s https://digesta-ia.streamlit.app > /dev/null
