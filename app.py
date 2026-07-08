@@ -701,11 +701,20 @@ with tab_ia:
                 }
             )
 
+            # =============================================================
+            # GRÁFICO TOP 10 – CORRIGIDO (ax.invert_yaxis())
+            # =============================================================
             st.subheader("📊 Top 10 – Potencial de Redução de Emissões")
             fig, ax = plt.subplots(figsize=(10, 6))
             top10 = df_agg.head(10)
             cores = plt.cm.Greens(np.linspace(0.4, 0.9, 10))
             ax.barh(top10["Município"] + " - " + top10["UF"], top10["ER"], color=cores)
+            
+            # === CORREÇÃO APLICADA AQUI ===
+            # Inverte o eixo Y para que o maior valor fique no topo
+            ax.invert_yaxis()
+            # ===============================
+            
             ax.set_xlabel("Redução Líquida (tCO₂e/ano)")
             ax.set_title("Municípios com maior potencial de redução (usina de bioenergia)")
             ax.grid(True, linestyle="--", alpha=0.3)
@@ -714,6 +723,9 @@ with tab_ia:
             st.pyplot(fig)
             plt.close(fig)
 
+            # =============================================================
+            # GRÁFICO POR ESTADO (já está correto)
+            # =============================================================
             st.subheader("📊 Potencial por Estado (UF)")
             df_uf = df_agg.groupby("UF").agg({
                 "ER": "sum",
