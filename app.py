@@ -71,7 +71,7 @@ st.caption("Usina de Bioenergia e Biofertilizantes do IEE/USP | Metodologia: UNF
 tab_simulador, tab_ia = st.tabs(["🧪 Simulador da Usina IEE", "🤖 Potencial por Localidade (IA)"])
 
 # =============================================================================
-# ABA 1 – SIMULADOR DA USINA IEE (VERSÃO AVANÇADA)
+# ABA 1 – SIMULADOR DA USINA IEE (VERSÃO AVANÇADA) - CORRIGIDO
 # =============================================================================
 with tab_simulador:
     st.header("⚙️ Simulador Avançado – Usina IEE USP")
@@ -178,6 +178,10 @@ with tab_simulador:
 
             resultados_gwp = {}
             for nome_gwp, (gwp_ch4, gwp_n2o) in gwps.items():
+                # =============================================================
+                # CORREÇÃO 1: Adicionados os parâmetros de eficiência e umidade
+                # para contabilizar o benefício da geração de eletricidade!
+                # =============================================================
                 res = calcular_reducoes_com_parametros(
                     massa_ano_kg,
                     k=k_fixo,
@@ -188,7 +192,9 @@ with tab_simulador:
                     mcf=mcf,
                     tipo_digestor=tipo_digestor,
                     gwp_ch4=gwp_ch4,
-                    gwp_n2o=gwp_n2o
+                    gwp_n2o=gwp_n2o,
+                    eficiencia_motor=0.40,  # 40% de eficiência elétrica (padrão para motogeradores)
+                    umidade=0.80             # 80% de umidade do resíduo
                 )
                 resultados_gwp[nome_gwp] = res
 
@@ -246,6 +252,8 @@ with tab_simulador:
             - k = {formatar_br(k_fixo)} ano⁻¹
             - DOC = {formatar_br(doc_fixo)}
             - DOCf (Tabela 7) = {formatar_br(docf_selecionado)} → {tipo_residuo}
+            - **Eficiência do motor:** 40% (considerado no cálculo da energia gerada)
+            - **Umidade do resíduo:** 80%
             """)
 
             st.subheader("📊 Comparação entre Cenários de GWP")
@@ -351,7 +359,9 @@ with tab_simulador:
                     mcf=1.0,
                     tipo_digestor=tipo_digestor,
                     gwp_ch4=gwp20_ch4,
-                    gwp_n2o=gwp20_n2o
+                    gwp_n2o=gwp20_n2o,
+                    eficiencia_motor=0.40,
+                    umidade=0.80
                 )
                 return res['ER']
 
@@ -479,7 +489,7 @@ with tab_simulador:
 
 
 # =============================================================================
-# ABA 2 – IA (POTENCIAL POR LOCALIDADE)
+# ABA 2 – IA (POTENCIAL POR LOCALIDADE) - CORRIGIDO
 # =============================================================================
 with tab_ia:
     st.header("🧠 Análise de Potencial por Localidade (IA)")
@@ -604,6 +614,11 @@ with tab_ia:
                     captura = row["CAPTURA"]
 
                     try:
+                        # =============================================================
+                        # CORREÇÃO 2: Adicionados os parâmetros de eficiência e umidade
+                        # para contabilizar o benefício da geração de eletricidade!
+                        # Isso vai transformar o ER de negativo para positivo!
+                        # =============================================================
                         resultado = calcular_reducoes_com_parametros(
                             massa_ano_kg=massa_rota * 1000,
                             k=k,
@@ -612,7 +627,9 @@ with tab_ia:
                             captura_metano=captura,
                             storage_factor=storage_factor_ia,
                             mcf=mcf,
-                            tipo_digestor=tipo_digestor_ia
+                            tipo_digestor=tipo_digestor_ia,
+                            eficiencia_motor=0.40,  # 40% de eficiência elétrica
+                            umidade=0.80             # 80% de umidade do resíduo
                         )
                     except Exception as e:
                         continue
@@ -710,10 +727,9 @@ with tab_ia:
             cores = plt.cm.Greens(np.linspace(0.4, 0.9, 10))
             ax.barh(top10["Município"] + " - " + top10["UF"], top10["ER"], color=cores)
             
-            # === CORREÇÃO APLICADA AQUI ===
-            # Inverte o eixo Y para que o maior valor fique no topo
+            # === CORREÇÃO VISUAL: Inverte o eixo Y para o maior valor ficar no topo ===
             ax.invert_yaxis()
-            # ===============================
+            # ========================================================================
             
             ax.set_xlabel("Redução Líquida (tCO₂e/ano)")
             ax.set_title("Municípios com maior potencial de redução (usina de bioenergia)")
@@ -762,6 +778,7 @@ with tab_ia:
             - **Redução Líquida (ER)**: é o potencial de créditos de carbono.  
             - Municípios com maior **ER** têm maior potencial de gerar receita com créditos de carbono.
             - **DOCf** é fixo por tipo de resíduo (Tabela 7 da A6.4-AMT-003) – calculado com base na caracterização do SNIS.
+            - **Agora o cálculo inclui o benefício da geração de eletricidade** (eficiência do motor = 40%, umidade = 80%), conforme fator de emissão da rede brasileira (0,0461 tCO₂/MWh).
             """)
 
             st.session_state.df_potencial = df_agg
