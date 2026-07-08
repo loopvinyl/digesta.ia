@@ -46,6 +46,40 @@ from utils.config import (
 from utils.ia_classificacao import ClassificadorDestinoIA
 
 # =============================================================================
+# FUNÇÃO CORRIGIDA PARA CÁLCULO DO PE (EMBUTIDA NO APP)
+# =============================================================================
+def calcular_pe_corrigido(massa_ano_kg, ch4_gerado, eficiencia_motor, umidade, gwp_ch4, storage_factor):
+    """
+    Calcula as emissões do projeto (PE) de forma correta:
+    - Slip do motor (3% do CH4)
+    - Geração de energia elétrica (kWh)
+    - Deslocamento da rede elétrica (fator 0.0461 kg CO2/kWh)
+    - Consumo interno da usina (5% da energia gerada)
+    Retorna: pe_total (tCO2e), energia_kwh, energia_evitada_tco2 (tCO2e)
+    """
+    # 1. Slip (escape de metano) - 3% do CH4 produzido
+    slip_percentual = 0.03  # 3% (padrão para motores modernos)
+    pe_ch4_slip = ch4_gerado * slip_percentual  # kg CH4
+
+    # 2. Energia gerada (kWh)
+    pci_ch4 = 13.9  # kWh/kg CH4 (PCI do metano)
+    energia_kwh = ch4_gerado * pci_ch4 * eficiencia_motor * umidade
+
+    # 3. Emissões evitadas pela energia (deslocamento da rede)
+    # Fator de emissão do SIN = 0.0461 kg CO2/kWh = 0.0000461 tCO2/kWh
+    fator_emissao_rede = 0.0000461  # tCO2/kWh
+    energia_evitada_tco2 = energia_kwh * fator_emissao_rede
+
+    # 4. Consumo interno da usina (5% da energia gerada)
+    consumo_interno_kwh = energia_kwh * 0.05
+    pe_operacional_tco2 = consumo_interno_kwh * fator_emissao_rede
+
+    # 5. PE total (tCO2e) - quanto menor (ou negativo), melhor
+    pe_total = (pe_ch4_slip * gwp_ch4) + pe_operacional_tco2 - energia_evitada_tco2
+
+    return pe_total, energia_kwh, energia_evitada_tco2
+
+# =============================================================================
 # INICIALIZAÇÃO DO ESTADO DA SESSÃO
 # =============================================================================
 if 'preco_carbono' not in st.session_state:
@@ -58,38 +92,6 @@ if 'taxa_cambio' not in st.session_state:
     st.session_state.moeda_real = moeda_r
 if 'df_potencial' not in st.session_state:
     st.session_state.df_potencial = None
-
-# =============================================================================
-# FUNÇÃO CORRIGIDA PARA CÁLCULO DO PE (EMBUTIDA NO APP)
-# =============================================================================
-def calcular_pe_corrigido(massa_ano_kg, ch4_gerado, eficiencia_motor, umidade, gwp_ch4, storage_factor):
-    """
-    Calcula as emissões do projeto (PE) de forma correta:
-    - Slip do motor (3% do CH4)
-    - Geração de energia elétrica (kWh)
-    - Deslocamento da rede elétrica (fator 0.0461 kg CO2/kWh)
-    - Consumo interno da usina (5% da energia gerada)
-    """
-    # 1. Slip (escape de metano)
-    slip_percentual = 0.03  # 3% (padrão para motores modernos)
-    pe_ch4_slip = ch4_gerado * slip_percentual  # kg CH4
-
-    # 2. Energia gerada (kWh)
-    pci_ch4 = 13.9  # kWh/kg CH4
-    energia_kwh = ch4_gerado * pci_ch4 * eficiencia_motor * umidade
-
-    # 3. Emissões evitadas pela energia (deslocamento da rede)
-    fator_emissao_rede = 0.0000461  # tCO2/kWh (0.0461 kg/kWh)
-    energia_evitada_tco2 = energia_kwh * fator_emissao_rede
-
-    # 4. Consumo interno da usina (5% da energia gerada)
-    consumo_interno_kwh = energia_kwh * 0.05
-    pe_operacional_tco2 = consumo_interno_kwh * fator_emissao_rede
-
-    # 5. PE total (tCO2e)
-    pe_total = (pe_ch4_slip * gwp_ch4) + pe_operacional_tco2 - energia_evitada_tco2
-
-    return pe_total, energia_kwh, energia_evitada_tco2
 
 # =============================================================================
 # TÍTULO
@@ -120,7 +122,7 @@ with tab_simulador:
     """)
 
     # =============================================================
-    # PARÂMETROS DE ENTRADA (COM SLIDERS DE EFICIÊNCIA E UMIDADE)
+    # PARÂMETROS DE ENTRADA
     # =============================================================
     col1, col2 = st.columns(2)
     with col1:
@@ -158,7 +160,7 @@ with tab_simulador:
 
         anos_simulacao = st.slider("Anos de simulação", 5, 50, 20, 5)
 
-    # NOVOS SLIDERS PARA ENERGIA
+    # NOVOS SLIDERS PARA EFICIÊNCIA E UMIDADE
     col3, col4 = st.columns(2)
     with col3:
         eficiencia_motor = st.slider(
@@ -232,23 +234,25 @@ with tab_simulador:
             k_fixo = K_PADRAO
             mcf = 1.0
 
-            # Estima o metano gerado anualmente
-            ch4_gerado = estimar_metano_produzido(massa_ano_kg)  # kg CH4/ano
+            # Estima o metano gerado anualmente (kg CH4/ano)
+            ch4_gerado = estimar_metano_produzido(massa_ano_kg)
 
             resultados_gwp = {}
             for nome_gwp, (gwp_ch4, gwp_n2o) in gwps.items():
-                # Baseline (aterro)
+                # Baseline (aterro) - total em tCO2e no período
                 baseline = calcular_baseline_aterro_series(
                     massa_ano_kg, captura_metano_fixo, k_fixo, doc_fixo, docf_selecionado, mcf, anos_simulacao
                 ).sum()
                 
-                # PE corrigido (usando a nova função)
-                pe_total, energia_kwh, energia_evitada = calcular_pe_corrigido(
+                # PE corrigido (retorna valores anuais)
+                pe_anual, energia_kwh_anual, energia_evitada_anual = calcular_pe_corrigido(
                     massa_ano_kg, ch4_gerado, eficiencia_motor, umidade, gwp_ch4, storage_factor_manual
-                ) * anos_simulacao  # multiplica pelos anos (a função retorna valor anual)
+                )
+                pe_total = pe_anual * anos_simulacao
+                energia_kwh_total = energia_kwh_anual * anos_simulacao
+                energia_evitada_total = energia_evitada_anual * anos_simulacao
 
-                # LE (vazamento do digestato)
-                # Usamos a função original para LE
+                # LE (vazamento do digestato) - total no período
                 emissoes_biodigestor = calcular_emissoes_biodigestor_series(
                     ch4_gerado, tipo_digestor, storage_factor_manual, anos_simulacao
                 )
@@ -262,8 +266,8 @@ with tab_simulador:
                     'PE_total': pe_total,
                     'LE_total': le_total,
                     'ER': er_total,
-                    'energia_kwh': energia_kwh * anos_simulacao,
-                    'energia_evitada_tco2': energia_evitada * anos_simulacao
+                    'energia_kwh': energia_kwh_total,
+                    'energia_evitada_tco2': energia_evitada_total
                 }
 
             resultados = resultados_gwp["Otimista (GWP-20)"]
@@ -280,15 +284,12 @@ with tab_simulador:
             baseline_serie = calcular_baseline_aterro_series(
                 massa_ano_kg, captura_metano_fixo, k_fixo, doc_fixo, docf_selecionado, mcf, anos_simulacao
             )
-            # Para as séries de PE e LE, usamos a lógica original (mas com nosso PE corrigido apenas para o total)
-            # Como a série diária de PE não é trivial, vamos manter a original para o gráfico,
-            # mas ajustar o total com nosso valor corrigido.
             emissoes_biodigestor = calcular_emissoes_biodigestor_series(
                 ch4_gerado, tipo_digestor, storage_factor_manual, anos_simulacao
             )
             pe_serie_original = emissoes_biodigestor['PE_total']
             le_serie = emissoes_biodigestor['LE_total']
-            # Ajustamos a série de PE para ter o mesmo total que o nosso PE corrigido
+            # Ajusta a série de PE para ter o total correto (usando nosso PE corrigido)
             fator_ajuste = pe_total / pe_serie_original.sum() if pe_serie_original.sum() != 0 else 0
             pe_serie = pe_serie_original * fator_ajuste
             er_serie = baseline_serie - pe_serie - le_serie
@@ -442,17 +443,17 @@ with tab_simulador:
                 baseline_sobol = calcular_baseline_aterro_series(
                     massa_ano_kg, captura_sobol, k_sobol, DOC_sobol, docf_selecionado, mcf, anos_simulacao
                 ).sum()
-                # PE corrigido
-                ch4_gerado_sobol = estimar_metano_produzido(massa_ano_kg)
-                pe_sobol, _, _ = calcular_pe_corrigido(
-                    massa_ano_kg, ch4_gerado_sobol, eficiencia_motor, umidade, gwp20_ch4, storage_sobol
-                ) * anos_simulacao
+                # PE corrigido (anual)
+                pe_anual, _, _ = calcular_pe_corrigido(
+                    massa_ano_kg, ch4_gerado, eficiencia_motor, umidade, gwp20_ch4, storage_sobol
+                )
+                pe_total_sobol = pe_anual * anos_simulacao
                 # LE
                 emissoes_biodigestor_sobol = calcular_emissoes_biodigestor_series(
-                    ch4_gerado_sobol, tipo_digestor, storage_sobol, anos_simulacao
+                    ch4_gerado, tipo_digestor, storage_sobol, anos_simulacao
                 )
                 le_sobol = emissoes_biodigestor_sobol['LE_total'].sum()
-                er_sobol = baseline_sobol - pe_sobol - le_sobol
+                er_sobol = baseline_sobol - pe_total_sobol - le_sobol
                 return er_sobol
 
             with st.spinner("Calculando índices Sobol..."):
@@ -501,17 +502,17 @@ with tab_simulador:
                     baseline_mc = calcular_baseline_aterro_series(
                         massa_ano_kg, captura_mc[i], k_mc[i], DOC_mc[i], docf_selecionado, mcf, anos_simulacao
                     ).sum()
-                    # PE corrigido
-                    ch4_gerado_mc = estimar_metano_produzido(massa_ano_kg)
-                    pe_mc, _, _ = calcular_pe_corrigido(
-                        massa_ano_kg, ch4_gerado_mc, eficiencia_mc[i], umidade_mc[i], gwp_ch4, storage_mc[i]
-                    ) * anos_simulacao
+                    # PE corrigido (anual)
+                    pe_anual_mc, _, _ = calcular_pe_corrigido(
+                        massa_ano_kg, ch4_gerado, eficiencia_mc[i], umidade_mc[i], gwp_ch4, storage_mc[i]
+                    )
+                    pe_total_mc = pe_anual_mc * anos_simulacao
                     # LE
                     emissoes_biodigestor_mc = calcular_emissoes_biodigestor_series(
-                        ch4_gerado_mc, tipo_digestor, storage_mc[i], anos_simulacao
+                        ch4_gerado, tipo_digestor, storage_mc[i], anos_simulacao
                     )
                     le_mc = emissoes_biodigestor_mc['LE_total'].sum()
-                    er_mc = baseline_mc - pe_mc - le_mc
+                    er_mc = baseline_mc - pe_total_mc - le_mc
                     er_arr.append(er_mc)
                 mc_results[nome_gwp] = np.array(er_arr)
 
@@ -709,8 +710,7 @@ with tab_ia:
                     captura = row["CAPTURA"]
 
                     try:
-                        # Usamos a função original do utils, mas passamos os parâmetros
-                        # de eficiência e umidade para ela considerar a energia.
+                        # Usamos a função original do utils, passando os parâmetros de energia
                         resultado = calcular_reducoes_com_parametros(
                             massa_ano_kg=massa_rota * 1000,
                             k=k,
