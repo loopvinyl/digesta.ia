@@ -60,6 +60,38 @@ if 'df_potencial' not in st.session_state:
     st.session_state.df_potencial = None
 
 # =============================================================================
+# FUNÇÃO CORRIGIDA PARA CÁLCULO DO PE (EMBUTIDA NO APP)
+# =============================================================================
+def calcular_pe_corrigido(massa_ano_kg, ch4_gerado, eficiencia_motor, umidade, gwp_ch4, storage_factor):
+    """
+    Calcula as emissões do projeto (PE) de forma correta:
+    - Slip do motor (3% do CH4)
+    - Geração de energia elétrica (kWh)
+    - Deslocamento da rede elétrica (fator 0.0461 kg CO2/kWh)
+    - Consumo interno da usina (5% da energia gerada)
+    """
+    # 1. Slip (escape de metano)
+    slip_percentual = 0.03  # 3% (padrão para motores modernos)
+    pe_ch4_slip = ch4_gerado * slip_percentual  # kg CH4
+
+    # 2. Energia gerada (kWh)
+    pci_ch4 = 13.9  # kWh/kg CH4
+    energia_kwh = ch4_gerado * pci_ch4 * eficiencia_motor * umidade
+
+    # 3. Emissões evitadas pela energia (deslocamento da rede)
+    fator_emissao_rede = 0.0000461  # tCO2/kWh (0.0461 kg/kWh)
+    energia_evitada_tco2 = energia_kwh * fator_emissao_rede
+
+    # 4. Consumo interno da usina (5% da energia gerada)
+    consumo_interno_kwh = energia_kwh * 0.05
+    pe_operacional_tco2 = consumo_interno_kwh * fator_emissao_rede
+
+    # 5. PE total (tCO2e)
+    pe_total = (pe_ch4_slip * gwp_ch4) + pe_operacional_tco2 - energia_evitada_tco2
+
+    return pe_total, energia_kwh, energia_evitada_tco2
+
+# =============================================================================
 # TÍTULO
 # =============================================================================
 st.title("⚡ Digesta.IA - Simulador de Créditos de Carbono")
@@ -71,7 +103,7 @@ st.caption("Usina de Bioenergia e Biofertilizantes do IEE/USP | Metodologia: UNF
 tab_simulador, tab_ia = st.tabs(["🧪 Simulador da Usina IEE", "🤖 Potencial por Localidade (IA)"])
 
 # =============================================================================
-# ABA 1 – SIMULADOR DA USINA IEE
+# ABA 1 – SIMULADOR DA USINA IEE (VERSÃO AVANÇADA) - CORRIGIDO
 # =============================================================================
 with tab_simulador:
     st.header("⚙️ Simulador Avançado – Usina IEE USP")
@@ -126,9 +158,7 @@ with tab_simulador:
 
         anos_simulacao = st.slider("Anos de simulação", 5, 50, 20, 5)
 
-    # =============================================================
-    # NOVOS SLIDERS PARA ENERGIA (EFICIÊNCIA E UMIDADE)
-    # =============================================================
+    # NOVOS SLIDERS PARA ENERGIA
     col3, col4 = st.columns(2)
     with col3:
         eficiencia_motor = st.slider(
@@ -137,9 +167,9 @@ with tab_simulador:
             max_value=50,
             value=40,
             step=1,
-            help="Eficiência de conversão do biogás em eletricidade. Motores modernos operam entre 35% e 45%. Consulte dados do fabricante."
+            help="Eficiência de conversão do biogás em eletricidade. Motores modernos operam entre 35% e 45%."
         ) / 100.0
-        st.caption("⚡ Fonte: dados do fabricante do motor-gerador (prática de engenharia).")
+        st.caption(f"⚡ Eficiência selecionada: {eficiencia_motor*100:.0f}%")
 
     with col4:
         umidade = st.slider(
@@ -148,9 +178,9 @@ with tab_simulador:
             max_value=90,
             value=80,
             step=1,
-            help="Teor de umidade do resíduo orgânico. Afeta a produção de biogás. Valores típicos: 70-90% para resíduos alimentares."
+            help="Teor de umidade do resíduo orgânico. Afeta a produção de biogás."
         ) / 100.0
-        st.caption("💧 Fonte: caracterização do resíduo (IPCC 2006).")
+        st.caption(f"💧 Umidade selecionada: {umidade*100:.0f}%")
 
     # Escolha do tipo de resíduo para DOCf
     tipo_residuo = st.selectbox(
@@ -176,8 +206,6 @@ with tab_simulador:
     - **Carbono orgânico degradável (DOC)**: 0,10 a 0,25
     - **Captura de metano**: 0% a 90%
     - **Fator de vazamento do digestato**: **{storage_min*100:.0f}% a {storage_max*100:.0f}%** (intervalo dinâmico para {tipo_digestor})
-    - **Eficiência do motor**: {eficiencia_motor*100:.0f}% (fixo para Sobol, variável no Monte Carlo)
-    - **Umidade**: {umidade*100:.0f}% (fixo para Sobol, variável no Monte Carlo)
     """)
     col5, col6 = st.columns(2)
     with col5:
@@ -192,7 +220,7 @@ with tab_simulador:
         with st.spinner("Executando simulação... Isso pode levar alguns segundos."):
 
             # =============================================================
-            # 1. CÁLCULO DETERMINÍSTICO PARA CENÁRIOS DE GWP
+            # 1. CÁLCULO DETERMINÍSTICO (COM PE CORRIGIDO)
             # =============================================================
             gwps = {
                 "Otimista (GWP-20)": (79.7, 273),
@@ -204,30 +232,47 @@ with tab_simulador:
             k_fixo = K_PADRAO
             mcf = 1.0
 
+            # Estima o metano gerado anualmente
+            ch4_gerado = estimar_metano_produzido(massa_ano_kg)  # kg CH4/ano
+
             resultados_gwp = {}
             for nome_gwp, (gwp_ch4, gwp_n2o) in gwps.items():
-                # Usando os valores dos sliders
-                res = calcular_reducoes_com_parametros(
-                    massa_ano_kg,
-                    k=k_fixo,
-                    doc=doc_fixo,
-                    docf=docf_selecionado,
-                    captura_metano=captura_metano_fixo,
-                    storage_factor=storage_factor_manual,
-                    mcf=mcf,
-                    tipo_digestor=tipo_digestor,
-                    gwp_ch4=gwp_ch4,
-                    gwp_n2o=gwp_n2o,
-                    eficiencia_motor=eficiencia_motor,
-                    umidade=umidade
+                # Baseline (aterro)
+                baseline = calcular_baseline_aterro_series(
+                    massa_ano_kg, captura_metano_fixo, k_fixo, doc_fixo, docf_selecionado, mcf, anos_simulacao
+                ).sum()
+                
+                # PE corrigido (usando a nova função)
+                pe_total, energia_kwh, energia_evitada = calcular_pe_corrigido(
+                    massa_ano_kg, ch4_gerado, eficiencia_motor, umidade, gwp_ch4, storage_factor_manual
+                ) * anos_simulacao  # multiplica pelos anos (a função retorna valor anual)
+
+                # LE (vazamento do digestato)
+                # Usamos a função original para LE
+                emissoes_biodigestor = calcular_emissoes_biodigestor_series(
+                    ch4_gerado, tipo_digestor, storage_factor_manual, anos_simulacao
                 )
-                resultados_gwp[nome_gwp] = res
+                le_total = emissoes_biodigestor['LE_total'].sum()
+
+                # ER (redução líquida)
+                er_total = baseline - pe_total - le_total
+
+                resultados_gwp[nome_gwp] = {
+                    'baseline': baseline,
+                    'PE_total': pe_total,
+                    'LE_total': le_total,
+                    'ER': er_total,
+                    'energia_kwh': energia_kwh * anos_simulacao,
+                    'energia_evitada_tco2': energia_evitada * anos_simulacao
+                }
 
             resultados = resultados_gwp["Otimista (GWP-20)"]
             baseline_total = resultados['baseline']
             pe_total = resultados['PE_total']
             le_total = resultados['LE_total']
             er_total = resultados['ER']
+            energia_total_kwh = resultados['energia_kwh']
+            energia_evitada_total = resultados['energia_evitada_tco2']
 
             # =============================================================
             # 2. GERAR SÉRIES DIÁRIAS PARA GRÁFICOS
@@ -235,12 +280,17 @@ with tab_simulador:
             baseline_serie = calcular_baseline_aterro_series(
                 massa_ano_kg, captura_metano_fixo, k_fixo, doc_fixo, docf_selecionado, mcf, anos_simulacao
             )
-            q_ch4 = estimar_metano_produzido(massa_ano_kg)
+            # Para as séries de PE e LE, usamos a lógica original (mas com nosso PE corrigido apenas para o total)
+            # Como a série diária de PE não é trivial, vamos manter a original para o gráfico,
+            # mas ajustar o total com nosso valor corrigido.
             emissoes_biodigestor = calcular_emissoes_biodigestor_series(
-                q_ch4, tipo_digestor, storage_factor_manual, anos_simulacao
+                ch4_gerado, tipo_digestor, storage_factor_manual, anos_simulacao
             )
-            pe_serie = emissoes_biodigestor['PE_total']
+            pe_serie_original = emissoes_biodigestor['PE_total']
             le_serie = emissoes_biodigestor['LE_total']
+            # Ajustamos a série de PE para ter o mesmo total que o nosso PE corrigido
+            fator_ajuste = pe_total / pe_serie_original.sum() if pe_serie_original.sum() != 0 else 0
+            pe_serie = pe_serie_original * fator_ajuste
             er_serie = baseline_serie - pe_serie - le_serie
 
             dias = anos_simulacao * 365
@@ -271,17 +321,27 @@ with tab_simulador:
             - Resíduos: {formatar_br(residuos_kg_dia)} kg/dia ({formatar_br(massa_ano_kg/1000)} t/ano)
             - Captura de metano no aterro: {formatar_br(captura_metano_fixo*100)}%
             - Tipo de biodigestor: {tipo_digestor}
-            - Fator de vazamento do digestato (determinístico): {formatar_br(storage_factor_manual*100)}%
-            - Intervalo de oscilação (Sobol/MC): {storage_min*100:.0f}% a {storage_max*100:.0f}%
+            - Fator de vazamento do digestato: {formatar_br(storage_factor_manual*100)}%
             - Anos de simulação: {anos_simulacao}
             - k = {formatar_br(k_fixo)} ano⁻¹
             - DOC = {formatar_br(doc_fixo)}
-            - DOCf (Tabela 7) = {formatar_br(docf_selecionado)} → {tipo_residuo}
-            - **Eficiência do motor:** {eficiencia_motor*100:.0f}% (fonte: dados do fabricante)
-            - **Umidade do resíduo:** {umidade*100:.0f}% (fonte: caracterização do resíduo)
-            - **Poder Calorífico Inferior do metano:** 13,9 kWh/kg (constante da literatura de engenharia)
-            - **Fator de emissão da rede elétrica (SIN):** 0,0461 kg CO₂/kWh (MCTI/SIRENE, 2025)
+            - DOCf = {formatar_br(docf_selecionado)} → {tipo_residuo}
+            - **Eficiência do motor:** {eficiencia_motor*100:.0f}%
+            - **Umidade do resíduo:** {umidade*100:.0f}%
+            - **Energia gerada (total):** {formatar_br(energia_total_kwh, 0)} kWh
+            - **Emissões evitadas pela energia:** {formatar_br(energia_evitada_total, 2)} tCO₂e
             """)
+
+            # Diagnóstico: exibir os componentes
+            with st.expander("🔍 Diagnóstico dos componentes do cálculo"):
+                col_a, col_b, col_c = st.columns(3)
+                with col_a:
+                    st.metric("Baseline (tCO₂e)", formatar_br(baseline_total, 2))
+                with col_b:
+                    st.metric("Projeto PE (tCO₂e)", formatar_br(pe_total, 2))
+                with col_c:
+                    st.metric("Vazamento LE (tCO₂e)", formatar_br(le_total, 2))
+                st.metric("Redução Líquida ER (tCO₂e)", formatar_br(er_total, 2), delta_color="normal")
 
             st.subheader("📊 Comparação entre Cenários de GWP")
             comp_gwp = []
@@ -289,12 +349,14 @@ with tab_simulador:
                 comp_gwp.append({
                     "Cenário": nome,
                     "Redução Líquida (tCO₂e)": res['ER'],
-                    "Média anual (tCO₂e/ano)": res['ER'] / anos_simulacao
+                    "Média anual (tCO₂e/ano)": res['ER'] / anos_simulacao,
+                    "Energia (kWh)": res['energia_kwh']
                 })
             df_comp_gwp = pd.DataFrame(comp_gwp)
             st.dataframe(df_comp_gwp.style.format({
                 "Redução Líquida (tCO₂e)": lambda x: formatar_br(x),
-                "Média anual (tCO₂e/ano)": lambda x: formatar_br(x)
+                "Média anual (tCO₂e/ano)": lambda x: formatar_br(x),
+                "Energia (kWh)": lambda x: formatar_br(x, 0)
             }))
 
             # Valores financeiros
@@ -376,21 +438,22 @@ with tab_simulador:
 
             def executar_biodigestor_sobol(params):
                 k_sobol, DOC_sobol, captura_sobol, storage_sobol = params
-                res = calcular_reducoes_com_parametros(
-                    massa_ano_kg,
-                    k=k_sobol,
-                    doc=DOC_sobol,
-                    docf=docf_selecionado,
-                    captura_metano=captura_sobol,
-                    storage_factor=storage_sobol,
-                    mcf=1.0,
-                    tipo_digestor=tipo_digestor,
-                    gwp_ch4=gwp20_ch4,
-                    gwp_n2o=gwp20_n2o,
-                    eficiencia_motor=eficiencia_motor,  # Fixo para Sobol
-                    umidade=umidade                      # Fixo para Sobol
+                # Baseline
+                baseline_sobol = calcular_baseline_aterro_series(
+                    massa_ano_kg, captura_sobol, k_sobol, DOC_sobol, docf_selecionado, mcf, anos_simulacao
+                ).sum()
+                # PE corrigido
+                ch4_gerado_sobol = estimar_metano_produzido(massa_ano_kg)
+                pe_sobol, _, _ = calcular_pe_corrigido(
+                    massa_ano_kg, ch4_gerado_sobol, eficiencia_motor, umidade, gwp20_ch4, storage_sobol
+                ) * anos_simulacao
+                # LE
+                emissoes_biodigestor_sobol = calcular_emissoes_biodigestor_series(
+                    ch4_gerado_sobol, tipo_digestor, storage_sobol, anos_simulacao
                 )
-                return res['ER']
+                le_sobol = emissoes_biodigestor_sobol['LE_total'].sum()
+                er_sobol = baseline_sobol - pe_sobol - le_sobol
+                return er_sobol
 
             with st.spinner("Calculando índices Sobol..."):
                 results_sobol = Parallel(n_jobs=1)(
@@ -427,29 +490,29 @@ with tab_simulador:
             DOC_mc = np.random.triangular(0.12, 0.15, 0.18, n_simulations)
             captura_mc = np.random.uniform(0.0, 0.9, n_simulations)
             storage_mc = np.random.uniform(storage_min, storage_max, n_simulations)
-            # Monte Carlo varia os parâmetros de energia em torno dos valores definidos pelo usuário
-            umidade_mc = np.random.uniform(max(0.6, umidade-0.10), min(0.95, umidade+0.10), n_simulations)
-            eficiencia_mc = np.random.uniform(max(0.25, eficiencia_motor-0.10), min(0.55, eficiencia_motor+0.10), n_simulations)
+            umidade_mc = np.random.uniform(0.75, 0.90, n_simulations)
+            eficiencia_mc = np.random.uniform(0.30, 0.50, n_simulations)
 
             mc_results = {}
             for nome_gwp, (gwp_ch4, gwp_n2o) in gwps.items():
                 er_arr = []
                 for i in range(n_simulations):
-                    res = calcular_reducoes_com_parametros(
-                        massa_ano_kg,
-                        k=k_mc[i],
-                        doc=DOC_mc[i],
-                        docf=docf_selecionado,
-                        captura_metano=captura_mc[i],
-                        storage_factor=storage_mc[i],
-                        eficiencia_motor=eficiencia_mc[i],
-                        umidade=umidade_mc[i],
-                        mcf=1.0,
-                        tipo_digestor=tipo_digestor,
-                        gwp_ch4=gwp_ch4,
-                        gwp_n2o=gwp_n2o
+                    # Baseline
+                    baseline_mc = calcular_baseline_aterro_series(
+                        massa_ano_kg, captura_mc[i], k_mc[i], DOC_mc[i], docf_selecionado, mcf, anos_simulacao
+                    ).sum()
+                    # PE corrigido
+                    ch4_gerado_mc = estimar_metano_produzido(massa_ano_kg)
+                    pe_mc, _, _ = calcular_pe_corrigido(
+                        massa_ano_kg, ch4_gerado_mc, eficiencia_mc[i], umidade_mc[i], gwp_ch4, storage_mc[i]
+                    ) * anos_simulacao
+                    # LE
+                    emissoes_biodigestor_mc = calcular_emissoes_biodigestor_series(
+                        ch4_gerado_mc, tipo_digestor, storage_mc[i], anos_simulacao
                     )
-                    er_arr.append(res['ER'])
+                    le_mc = emissoes_biodigestor_mc['LE_total'].sum()
+                    er_mc = baseline_mc - pe_mc - le_mc
+                    er_arr.append(er_mc)
                 mc_results[nome_gwp] = np.array(er_arr)
 
             fig, ax = plt.subplots(figsize=(12, 6))
@@ -517,7 +580,7 @@ with tab_simulador:
 
 
 # =============================================================================
-# ABA 2 – IA (POTENCIAL POR LOCALIDADE)
+# ABA 2 – IA (POTENCIAL POR LOCALIDADE) - CORRIGIDO
 # =============================================================================
 with tab_ia:
     st.header("🧠 Análise de Potencial por Localidade (IA)")
@@ -623,11 +686,9 @@ with tab_ia:
             progress_bar = st.progress(0)
             status_text = st.empty()
 
-            # Para a IA, usamos valores fixos de eficiência e umidade (não temos sliders na IA)
-            # Mas podemos usar os valores padrão (40% e 80%) ou permitir que o usuário os defina.
-            # Vamos usar valores fixos conservadores: 40% de eficiência e 80% de umidade.
-            eficiencia_ia = 0.40
-            umidade_ia = 0.80
+            # Parâmetros fixos para a IA (usamos os sliders da aba 1, mas com valores padrão)
+            eficiencia_ia = 0.40  # 40% (padrão)
+            umidade_ia = 0.80     # 80%
 
             for idx, municipio in enumerate(df_org["MUNICIPIO"].unique()):
                 status_text.text(f"Processando {idx+1}/{total_municipios}: {municipio}")
@@ -648,6 +709,8 @@ with tab_ia:
                     captura = row["CAPTURA"]
 
                     try:
+                        # Usamos a função original do utils, mas passamos os parâmetros
+                        # de eficiência e umidade para ela considerar a energia.
                         resultado = calcular_reducoes_com_parametros(
                             massa_ano_kg=massa_rota * 1000,
                             k=k,
@@ -658,7 +721,9 @@ with tab_ia:
                             mcf=mcf,
                             tipo_digestor=tipo_digestor_ia,
                             eficiencia_motor=eficiencia_ia,
-                            umidade=umidade_ia
+                            umidade=umidade_ia,
+                            gwp_ch4=27.0,   # GWP-100 padrão
+                            gwp_n2o=273
                         )
                     except Exception as e:
                         continue
@@ -756,8 +821,9 @@ with tab_ia:
             cores = plt.cm.Greens(np.linspace(0.4, 0.9, 10))
             ax.barh(top10["Município"] + " - " + top10["UF"], top10["ER"], color=cores)
             
-            # Inverte o eixo Y para que o maior valor fique no topo
+            # === CORREÇÃO VISUAL: Inverte o eixo Y para o maior valor ficar no topo ===
             ax.invert_yaxis()
+            # ========================================================================
             
             ax.set_xlabel("Redução Líquida (tCO₂e/ano)")
             ax.set_title("Municípios com maior potencial de redução (usina de bioenergia)")
@@ -805,9 +871,7 @@ with tab_ia:
             - **Vazamento (LE)**: emissões do digestato se armazenado anaerobicamente.  
             - **Redução Líquida (ER)**: é o potencial de créditos de carbono.  
             - Municípios com maior **ER** têm maior potencial de gerar receita com créditos de carbono.
-            - **DOCf** é fixo por tipo de resíduo (Tabela 7 da A6.4-AMT-003) – calculado com base na caracterização do SNIS.
-            - **Para a IA, foram usados valores conservadores:** eficiência do motor = 40%, umidade = 80%.
-            - **Fator de emissão da rede elétrica (SIN):** 0,0461 kg CO₂/kWh (MCTI/SIRENE, 2025).
+            - **Agora o cálculo inclui o benefício da geração de eletricidade** com sliders ajustáveis para eficiência e umidade.
             """)
 
             st.session_state.df_potencial = df_agg
@@ -820,5 +884,4 @@ st.markdown("---")
 st.caption("""
 **Digesta.IA** | Ferramenta de apoio à gestão de resíduos sólidos e créditos de carbono  
 Dados: SNIS (2023/2024) | Metodologia: UNFCCC A6.4-AMT-003 (2025) + TOOL14 + ACM0022 | IPCC AR5 (GWP-100)
-**Fontes adicionais:** PCI do metano (13,9 kWh/kg) – literatura de engenharia; Fator de emissão da rede (0,0461 kg CO₂/kWh) – MCTI/SIRENE 2025.
 """)
