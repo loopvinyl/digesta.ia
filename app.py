@@ -46,24 +46,39 @@ from utils.config import (
 from utils.ia_classificacao import ClassificadorDestinoIA
 
 # =============================================================================
-# FUNÇÃO CORRIGIDA PARA CÁLCULO DO PE (EMBUTIDA NO APP)
+# FUNÇÃO CORRIGIDA PARA CÁLCULO DO PE (AJUSTE DA UMIDADE)
 # =============================================================================
-def calcular_pe_corrigido(massa_ano_kg, ch4_gerado, eficiencia_motor, umidade, gwp_ch4, storage_factor):
+def calcular_pe_corrigido(massa_ano_kg, ch4_gerado_bruto, eficiencia_motor, umidade, gwp_ch4, storage_factor):
     """
     Calcula as emissões do projeto (PE) de forma correta:
-    - Slip do motor (3% do CH4)
-    - Geração de energia elétrica (kWh)
-    - Deslocamento da rede elétrica (fator 0.0461 kg CO2/kWh)
-    - Consumo interno da usina (5% da energia gerada)
+    - A umidade é usada para calcular a massa seca (fração orgânica) que gera metano.
+    - O metano real é calculado a partir da massa seca.
+    - A energia gerada (kWh) = metano_real * PCI * eficiencia_motor (SEM multiplicar por umidade).
+    - Slip do motor = 3% do CH4 produzido.
+    - Deslocamento da rede elétrica (fator 0.0461 kg CO2/kWh).
+    - Consumo interno da usina (5% da energia gerada).
     Retorna: pe_total (tCO2e), energia_kwh, energia_evitada_tco2 (tCO2e)
     """
-    # 1. Slip (escape de metano) - 3% do CH4 produzido
-    slip_percentual = 0.03  # 3% (padrão para motores modernos)
-    pe_ch4_slip = ch4_gerado * slip_percentual  # kg CH4
+    # =============================================================
+    # CORREÇÃO: A umidade só serve para calcular a MASSA SECA
+    # O metano real é gerado APENAS pela fração orgânica seca.
+    # =============================================================
+    fracao_seca = 1 - umidade  # Ex: se umidade=0.8, fração_seca=0.2 (20% de sólidos)
+    massa_seca_kg = massa_ano_kg * fracao_seca
 
-    # 2. Energia gerada (kWh)
+    # Calcula o metano real a partir da MASSA SECA (não da úmida)
+    # Usamos a mesma função estimar_metano_produzido, que originalmente usa a massa total,
+    # mas aqui passamos a massa seca.
+    from utils.calculos_emissao import estimar_metano_produzido
+    ch4_real_kg = estimar_metano_produzido(massa_seca_kg)  # kg CH4/ano a partir da fração seca
+
+    # 1. Slip (escape de metano) - 3% do CH4 produzido
+    slip_percentual = 0.03
+    pe_ch4_slip = ch4_real_kg * slip_percentual
+
+    # 2. Energia gerada (kWh) - AGORA SEM A UMIDADE!
     pci_ch4 = 13.9  # kWh/kg CH4 (PCI do metano)
-    energia_kwh = ch4_gerado * pci_ch4 * eficiencia_motor * umidade
+    energia_kwh = ch4_real_kg * pci_ch4 * eficiencia_motor
 
     # 3. Emissões evitadas pela energia (deslocamento da rede)
     # Fator de emissão do SIN = 0.0461 kg CO2/kWh = 0.0000461 tCO2/kWh
@@ -180,7 +195,7 @@ with tab_simulador:
             max_value=90,
             value=80,
             step=1,
-            help="Teor de umidade do resíduo orgânico. Afeta a produção de biogás."
+            help="Teor de umidade do resíduo orgânico. Afeta a quantidade de metano gerado (quanto maior a umidade, menor a fração seca)."
         ) / 100.0
         st.caption(f"💧 Umidade selecionada: {umidade*100:.0f}%")
 
@@ -234,8 +249,9 @@ with tab_simulador:
             k_fixo = K_PADRAO
             mcf = 1.0
 
-            # Estima o metano gerado anualmente (kg CH4/ano)
-            ch4_gerado = estimar_metano_produzido(massa_ano_kg)
+            # Estima o metano gerado anualmente (kg CH4/ano) a partir da MASSA ÚMIDA
+            # (isso será usado apenas para o baseline e LE, que são função da massa total)
+            ch4_gerado_bruto = estimar_metano_produzido(massa_ano_kg)
 
             resultados_gwp = {}
             for nome_gwp, (gwp_ch4, gwp_n2o) in gwps.items():
@@ -245,16 +261,18 @@ with tab_simulador:
                 ).sum()
                 
                 # PE corrigido (retorna valores anuais)
+                # Passamos o ch4_gerado_bruto, mas a função interna recalcula o metano real baseado na massa seca.
                 pe_anual, energia_kwh_anual, energia_evitada_anual = calcular_pe_corrigido(
-                    massa_ano_kg, ch4_gerado, eficiencia_motor, umidade, gwp_ch4, storage_factor_manual
+                    massa_ano_kg, ch4_gerado_bruto, eficiencia_motor, umidade, gwp_ch4, storage_factor_manual
                 )
                 pe_total = pe_anual * anos_simulacao
                 energia_kwh_total = energia_kwh_anual * anos_simulacao
                 energia_evitada_total = energia_evitada_anual * anos_simulacao
 
                 # LE (vazamento do digestato) - total no período
+                # O LE é função do metano gerado a partir da MASSA ÚMIDA (como o TOOL14 define)
                 emissoes_biodigestor = calcular_emissoes_biodigestor_series(
-                    ch4_gerado, tipo_digestor, storage_factor_manual, anos_simulacao
+                    ch4_gerado_bruto, tipo_digestor, storage_factor_manual, anos_simulacao
                 )
                 le_total = emissoes_biodigestor['LE_total'].sum()
 
@@ -285,7 +303,7 @@ with tab_simulador:
                 massa_ano_kg, captura_metano_fixo, k_fixo, doc_fixo, docf_selecionado, mcf, anos_simulacao
             )
             emissoes_biodigestor = calcular_emissoes_biodigestor_series(
-                ch4_gerado, tipo_digestor, storage_factor_manual, anos_simulacao
+                ch4_gerado_bruto, tipo_digestor, storage_factor_manual, anos_simulacao
             )
             pe_serie_original = emissoes_biodigestor['PE_total']
             le_serie = emissoes_biodigestor['LE_total']
@@ -328,7 +346,7 @@ with tab_simulador:
             - DOC = {formatar_br(doc_fixo)}
             - DOCf = {formatar_br(docf_selecionado)} → {tipo_residuo}
             - **Eficiência do motor:** {eficiencia_motor*100:.0f}%
-            - **Umidade do resíduo:** {umidade*100:.0f}%
+            - **Umidade do resíduo:** {umidade*100:.0f}% (usada para calcular a massa seca que gera metano)
             - **Energia gerada (total):** {formatar_br(energia_total_kwh, 0)} kWh
             - **Emissões evitadas pela energia:** {formatar_br(energia_evitada_total, 2)} tCO₂e
             """)
@@ -443,14 +461,14 @@ with tab_simulador:
                 baseline_sobol = calcular_baseline_aterro_series(
                     massa_ano_kg, captura_sobol, k_sobol, DOC_sobol, docf_selecionado, mcf, anos_simulacao
                 ).sum()
-                # PE corrigido (anual)
+                # PE corrigido (anual) - passamos o ch4_gerado_bruto, mas a função recalcula com a massa seca
                 pe_anual, _, _ = calcular_pe_corrigido(
-                    massa_ano_kg, ch4_gerado, eficiencia_motor, umidade, gwp20_ch4, storage_sobol
+                    massa_ano_kg, ch4_gerado_bruto, eficiencia_motor, umidade, gwp20_ch4, storage_sobol
                 )
                 pe_total_sobol = pe_anual * anos_simulacao
                 # LE
                 emissoes_biodigestor_sobol = calcular_emissoes_biodigestor_series(
-                    ch4_gerado, tipo_digestor, storage_sobol, anos_simulacao
+                    ch4_gerado_bruto, tipo_digestor, storage_sobol, anos_simulacao
                 )
                 le_sobol = emissoes_biodigestor_sobol['LE_total'].sum()
                 er_sobol = baseline_sobol - pe_total_sobol - le_sobol
@@ -502,14 +520,14 @@ with tab_simulador:
                     baseline_mc = calcular_baseline_aterro_series(
                         massa_ano_kg, captura_mc[i], k_mc[i], DOC_mc[i], docf_selecionado, mcf, anos_simulacao
                     ).sum()
-                    # PE corrigido (anual)
+                    # PE corrigido (anual) - passamos o ch4_gerado_bruto, mas a função recalcula com a massa seca
                     pe_anual_mc, _, _ = calcular_pe_corrigido(
-                        massa_ano_kg, ch4_gerado, eficiencia_mc[i], umidade_mc[i], gwp_ch4, storage_mc[i]
+                        massa_ano_kg, ch4_gerado_bruto, eficiencia_mc[i], umidade_mc[i], gwp_ch4, storage_mc[i]
                     )
                     pe_total_mc = pe_anual_mc * anos_simulacao
                     # LE
                     emissoes_biodigestor_mc = calcular_emissoes_biodigestor_series(
-                        ch4_gerado, tipo_digestor, storage_mc[i], anos_simulacao
+                        ch4_gerado_bruto, tipo_digestor, storage_mc[i], anos_simulacao
                     )
                     le_mc = emissoes_biodigestor_mc['LE_total'].sum()
                     er_mc = baseline_mc - pe_total_mc - le_mc
@@ -687,8 +705,8 @@ with tab_ia:
             progress_bar = st.progress(0)
             status_text = st.empty()
 
-            # Parâmetros fixos para a IA (usamos os sliders da aba 1, mas com valores padrão)
-            eficiencia_ia = 0.40  # 40% (padrão)
+            # Parâmetros fixos para a IA (usamos valores padrão)
+            eficiencia_ia = 0.40  # 40%
             umidade_ia = 0.80     # 80%
 
             for idx, municipio in enumerate(df_org["MUNICIPIO"].unique()):
@@ -872,6 +890,7 @@ with tab_ia:
             - **Redução Líquida (ER)**: é o potencial de créditos de carbono.  
             - Municípios com maior **ER** têm maior potencial de gerar receita com créditos de carbono.
             - **Agora o cálculo inclui o benefício da geração de eletricidade** com sliders ajustáveis para eficiência e umidade.
+            - A **umidade** é usada para calcular a massa seca que efetivamente gera metano (fração orgânica).
             """)
 
             st.session_state.df_potencial = df_agg
