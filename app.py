@@ -71,7 +71,7 @@ st.caption("Usina de Bioenergia e Biofertilizantes do IEE/USP | Metodologia: UNF
 tab_simulador, tab_ia = st.tabs(["🧪 Simulador da Usina IEE", "🤖 Potencial por Localidade (IA)"])
 
 # =============================================================================
-# ABA 1 – SIMULADOR DA USINA IEE (VERSÃO AVANÇADA) - CORRIGIDO
+# ABA 1 – SIMULADOR DA USINA IEE
 # =============================================================================
 with tab_simulador:
     st.header("⚙️ Simulador Avançado – Usina IEE USP")
@@ -88,7 +88,7 @@ with tab_simulador:
     """)
 
     # =============================================================
-    # PARÂMETROS DE ENTRADA
+    # PARÂMETROS DE ENTRADA (COM SLIDERS DE EFICIÊNCIA E UMIDADE)
     # =============================================================
     col1, col2 = st.columns(2)
     with col1:
@@ -126,6 +126,32 @@ with tab_simulador:
 
         anos_simulacao = st.slider("Anos de simulação", 5, 50, 20, 5)
 
+    # =============================================================
+    # NOVOS SLIDERS PARA ENERGIA (EFICIÊNCIA E UMIDADE)
+    # =============================================================
+    col3, col4 = st.columns(2)
+    with col3:
+        eficiencia_motor = st.slider(
+            "Eficiência do motor (%) para geração de eletricidade",
+            min_value=20,
+            max_value=50,
+            value=40,
+            step=1,
+            help="Eficiência de conversão do biogás em eletricidade. Motores modernos operam entre 35% e 45%. Consulte dados do fabricante."
+        ) / 100.0
+        st.caption("⚡ Fonte: dados do fabricante do motor-gerador (prática de engenharia).")
+
+    with col4:
+        umidade = st.slider(
+            "Umidade do resíduo (%)",
+            min_value=70,
+            max_value=90,
+            value=80,
+            step=1,
+            help="Teor de umidade do resíduo orgânico. Afeta a produção de biogás. Valores típicos: 70-90% para resíduos alimentares."
+        ) / 100.0
+        st.caption("💧 Fonte: caracterização do resíduo (IPCC 2006).")
+
     # Escolha do tipo de resíduo para DOCf
     tipo_residuo = st.selectbox(
         "Tipo de resíduo (para DOCf – Tabela 7 da A6.4-AMT-003):",
@@ -150,11 +176,13 @@ with tab_simulador:
     - **Carbono orgânico degradável (DOC)**: 0,10 a 0,25
     - **Captura de metano**: 0% a 90%
     - **Fator de vazamento do digestato**: **{storage_min*100:.0f}% a {storage_max*100:.0f}%** (intervalo dinâmico para {tipo_digestor})
+    - **Eficiência do motor**: {eficiencia_motor*100:.0f}% (fixo para Sobol, variável no Monte Carlo)
+    - **Umidade**: {umidade*100:.0f}% (fixo para Sobol, variável no Monte Carlo)
     """)
-    col3, col4 = st.columns(2)
-    with col3:
+    col5, col6 = st.columns(2)
+    with col5:
         n_samples = st.slider("Número de amostras Sobol", 32, 256, 64, 16)
-    with col4:
+    with col6:
         n_simulations = st.slider("Número de simulações Monte Carlo", 50, 1000, 100, 50)
 
     # =============================================================
@@ -178,10 +206,7 @@ with tab_simulador:
 
             resultados_gwp = {}
             for nome_gwp, (gwp_ch4, gwp_n2o) in gwps.items():
-                # =============================================================
-                # CORREÇÃO 1: Adicionados os parâmetros de eficiência e umidade
-                # para contabilizar o benefício da geração de eletricidade!
-                # =============================================================
+                # Usando os valores dos sliders
                 res = calcular_reducoes_com_parametros(
                     massa_ano_kg,
                     k=k_fixo,
@@ -193,8 +218,8 @@ with tab_simulador:
                     tipo_digestor=tipo_digestor,
                     gwp_ch4=gwp_ch4,
                     gwp_n2o=gwp_n2o,
-                    eficiencia_motor=0.40,  # 40% de eficiência elétrica (padrão para motogeradores)
-                    umidade=0.80             # 80% de umidade do resíduo
+                    eficiencia_motor=eficiencia_motor,
+                    umidade=umidade
                 )
                 resultados_gwp[nome_gwp] = res
 
@@ -252,8 +277,10 @@ with tab_simulador:
             - k = {formatar_br(k_fixo)} ano⁻¹
             - DOC = {formatar_br(doc_fixo)}
             - DOCf (Tabela 7) = {formatar_br(docf_selecionado)} → {tipo_residuo}
-            - **Eficiência do motor:** 40% (considerado no cálculo da energia gerada)
-            - **Umidade do resíduo:** 80%
+            - **Eficiência do motor:** {eficiencia_motor*100:.0f}% (fonte: dados do fabricante)
+            - **Umidade do resíduo:** {umidade*100:.0f}% (fonte: caracterização do resíduo)
+            - **Poder Calorífico Inferior do metano:** 13,9 kWh/kg (constante da literatura de engenharia)
+            - **Fator de emissão da rede elétrica (SIN):** 0,0461 kg CO₂/kWh (MCTI/SIRENE, 2025)
             """)
 
             st.subheader("📊 Comparação entre Cenários de GWP")
@@ -360,8 +387,8 @@ with tab_simulador:
                     tipo_digestor=tipo_digestor,
                     gwp_ch4=gwp20_ch4,
                     gwp_n2o=gwp20_n2o,
-                    eficiencia_motor=0.40,
-                    umidade=0.80
+                    eficiencia_motor=eficiencia_motor,  # Fixo para Sobol
+                    umidade=umidade                      # Fixo para Sobol
                 )
                 return res['ER']
 
@@ -400,8 +427,9 @@ with tab_simulador:
             DOC_mc = np.random.triangular(0.12, 0.15, 0.18, n_simulations)
             captura_mc = np.random.uniform(0.0, 0.9, n_simulations)
             storage_mc = np.random.uniform(storage_min, storage_max, n_simulations)
-            umidade_mc = np.random.uniform(0.75, 0.90, n_simulations)
-            eficiencia_mc = np.random.uniform(0.30, 0.50, n_simulations)
+            # Monte Carlo varia os parâmetros de energia em torno dos valores definidos pelo usuário
+            umidade_mc = np.random.uniform(max(0.6, umidade-0.10), min(0.95, umidade+0.10), n_simulations)
+            eficiencia_mc = np.random.uniform(max(0.25, eficiencia_motor-0.10), min(0.55, eficiencia_motor+0.10), n_simulations)
 
             mc_results = {}
             for nome_gwp, (gwp_ch4, gwp_n2o) in gwps.items():
@@ -489,7 +517,7 @@ with tab_simulador:
 
 
 # =============================================================================
-# ABA 2 – IA (POTENCIAL POR LOCALIDADE) - CORRIGIDO
+# ABA 2 – IA (POTENCIAL POR LOCALIDADE)
 # =============================================================================
 with tab_ia:
     st.header("🧠 Análise de Potencial por Localidade (IA)")
@@ -595,6 +623,12 @@ with tab_ia:
             progress_bar = st.progress(0)
             status_text = st.empty()
 
+            # Para a IA, usamos valores fixos de eficiência e umidade (não temos sliders na IA)
+            # Mas podemos usar os valores padrão (40% e 80%) ou permitir que o usuário os defina.
+            # Vamos usar valores fixos conservadores: 40% de eficiência e 80% de umidade.
+            eficiencia_ia = 0.40
+            umidade_ia = 0.80
+
             for idx, municipio in enumerate(df_org["MUNICIPIO"].unique()):
                 status_text.text(f"Processando {idx+1}/{total_municipios}: {municipio}")
                 progress_bar.progress((idx+1)/total_municipios)
@@ -614,11 +648,6 @@ with tab_ia:
                     captura = row["CAPTURA"]
 
                     try:
-                        # =============================================================
-                        # CORREÇÃO 2: Adicionados os parâmetros de eficiência e umidade
-                        # para contabilizar o benefício da geração de eletricidade!
-                        # Isso vai transformar o ER de negativo para positivo!
-                        # =============================================================
                         resultado = calcular_reducoes_com_parametros(
                             massa_ano_kg=massa_rota * 1000,
                             k=k,
@@ -628,8 +657,8 @@ with tab_ia:
                             storage_factor=storage_factor_ia,
                             mcf=mcf,
                             tipo_digestor=tipo_digestor_ia,
-                            eficiencia_motor=0.40,  # 40% de eficiência elétrica
-                            umidade=0.80             # 80% de umidade do resíduo
+                            eficiencia_motor=eficiencia_ia,
+                            umidade=umidade_ia
                         )
                     except Exception as e:
                         continue
@@ -727,9 +756,8 @@ with tab_ia:
             cores = plt.cm.Greens(np.linspace(0.4, 0.9, 10))
             ax.barh(top10["Município"] + " - " + top10["UF"], top10["ER"], color=cores)
             
-            # === CORREÇÃO VISUAL: Inverte o eixo Y para o maior valor ficar no topo ===
+            # Inverte o eixo Y para que o maior valor fique no topo
             ax.invert_yaxis()
-            # ========================================================================
             
             ax.set_xlabel("Redução Líquida (tCO₂e/ano)")
             ax.set_title("Municípios com maior potencial de redução (usina de bioenergia)")
@@ -778,7 +806,8 @@ with tab_ia:
             - **Redução Líquida (ER)**: é o potencial de créditos de carbono.  
             - Municípios com maior **ER** têm maior potencial de gerar receita com créditos de carbono.
             - **DOCf** é fixo por tipo de resíduo (Tabela 7 da A6.4-AMT-003) – calculado com base na caracterização do SNIS.
-            - **Agora o cálculo inclui o benefício da geração de eletricidade** (eficiência do motor = 40%, umidade = 80%), conforme fator de emissão da rede brasileira (0,0461 tCO₂/MWh).
+            - **Para a IA, foram usados valores conservadores:** eficiência do motor = 40%, umidade = 80%.
+            - **Fator de emissão da rede elétrica (SIN):** 0,0461 kg CO₂/kWh (MCTI/SIRENE, 2025).
             """)
 
             st.session_state.df_potencial = df_agg
@@ -791,4 +820,5 @@ st.markdown("---")
 st.caption("""
 **Digesta.IA** | Ferramenta de apoio à gestão de resíduos sólidos e créditos de carbono  
 Dados: SNIS (2023/2024) | Metodologia: UNFCCC A6.4-AMT-003 (2025) + TOOL14 + ACM0022 | IPCC AR5 (GWP-100)
+**Fontes adicionais:** PCI do metano (13,9 kWh/kg) – literatura de engenharia; Fator de emissão da rede (0,0461 kg CO₂/kWh) – MCTI/SIRENE 2025.
 """)
